@@ -25,6 +25,6 @@ jobs:
       - name: Build
         run: dotnet build src/DevBridge.Server/DevBridge.Server.csproj --configuration Release --no-restore
       - name: Validate Bicep
-        uses: azure/cli@v2
+        uses: azure/cli@v3
         with:
           inlineScript: az bicep build --file infra/main.bicep --stdout > /dev/null
