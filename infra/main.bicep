@@ -33,6 +33,31 @@ resource artifacts 'Microsoft.Storage/storageAccounts/blobServices/containers@20
   properties: { publicAccess: 'None' }
 }
 
+resource diagnosticsTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2025-06-01' = {
+  name: '${storage.name}/default/DevBridgeDiagnostics'
+  properties: {}
+}
+
+resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
+  name: '${resourcePrefix}-logs'
+  location: location
+  properties: {
+    retentionInDays: 30
+    features: { enableLogAccessUsingOnlyResourcePermissions: true }
+  }
+}
+
+resource insights 'Microsoft.Insights/components@2020-02-02' = {
+  name: '${resourcePrefix}-insights'
+  location: location
+  kind: 'web'
+  properties: {
+    Application_Type: 'web'
+    IngestionMode: 'LogAnalytics'
+    WorkspaceResourceId: logs.id
+  }
+}
+
 resource plan 'Microsoft.Web/serverfarms@2025-03-01' = {
   name: planName
   location: location
@@ -62,9 +87,22 @@ resource app 'Microsoft.Web/sites@2025-03-01' = {
         { name: 'DevBridge__PublicBaseUrl', value: 'https://${appName}.azurewebsites.net' }
         { name: 'DevBridge__DeveloperAccessKey', value: developerAccessKey }
         { name: 'DevBridge__ArtifactPath', value: '/home/data/artifacts' }
+        { name: 'DevBridge__StorageAccountName', value: storage.name }
+        { name: 'DevBridge__DiagnosticTableName', value: 'DevBridgeDiagnostics' }
+        { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: insights.properties.ConnectionString }
         { name: 'WEBSITE_RUN_FROM_PACKAGE', value: '1' }
       ]
     }
+  }
+}
+
+resource tableContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storage.id, app.id, 'table-contributor')
+  scope: storage
+  properties: {
+    principalId: app.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')
   }
 }
 
@@ -81,3 +119,4 @@ resource blobContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = 
 output webAppName string = app.name
 output publicUrl string = 'https://${app.properties.defaultHostName}'
 output storageAccountName string = storage.name
+output applicationInsightsName string = insights.name

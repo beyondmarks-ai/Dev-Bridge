@@ -5,8 +5,10 @@ namespace DevBridge.Services;
 
 public sealed class SessionStore
 {
+    private readonly DiagnosticArchiveService _archive;
     private readonly ConcurrentDictionary<Guid, TestSession> _sessions = new();
     private readonly ConcurrentDictionary<string, DownloadTicket> _tickets = new();
+    public SessionStore(DiagnosticArchiveService archive) => _archive = archive;
     public void Add(TestSession session) => _sessions[session.Id] = session;
     public bool TryGet(Guid id, out TestSession session)
     {
@@ -16,6 +18,7 @@ public sealed class SessionStore
     public void AddEvent(TestSession session, DeviceEvent item)
     {
         session.Events.Enqueue(item);
+        _archive.Enqueue(session.Id, item);
         while (session.Events.Count > 1_000) session.Events.TryDequeue(out _);
     }
     public void AddTicket(string token, DownloadTicket ticket) => _tickets[token] = ticket;

@@ -17,6 +17,10 @@ DevBridge removes ad-hoc APK sharing through messaging apps, removable drives, a
 - Server-side SHA-256 calculation.
 - Authenticated, one-use download tickets with short expiry.
 - Connected-device, build, event, and tester-feedback views.
+- Structured crash, ANR, performance, launch, and installation event batches.
+- Automatic issue fingerprinting, occurrence counts, and affected-device grouping.
+- Secret redaction and managed-identity archival to Azure Table Storage.
+- Application Insights and Log Analytics infrastructure for service monitoring.
 - Automatic session and artifact expiry.
 - Reusable Bicep infrastructure and PowerShell deployment scripts.
 
@@ -33,10 +37,10 @@ Developer browser                            Android companion
                   ├── session and device authorization
                   ├── APK validation and hashing
                   ├── one-use download tickets
-                  └── diagnostics and feedback endpoints
+                  ├── diagnostics and feedback endpoints
+                  └── issue fingerprinting and aggregation
                                   │
-                         App Service storage
-                         (preview implementation)
+                  Azure Table Storage + Application Insights
 ```
 
 Both clients make outbound HTTPS requests. The developer machine does not need a public IP, router port forwarding, VPN, or a direct connection to the phone.
@@ -141,6 +145,8 @@ Publish the server using the web-app name returned by the deployment:
 | `GET /api/sessions/{id}/device` | Device bearer token | Retrieve app/build status |
 | `POST /api/sessions/{id}/builds/{buildId}/ticket` | Device bearer token | Issue one-use download URL |
 | `POST /api/sessions/{id}/events` | Device bearer token | Submit structured diagnostics |
+| `POST /api/sessions/{id}/diagnostics/batch` | Device bearer token | Submit crash/performance event batches |
+| `POST /api/sessions/{id}/installations` | Device bearer token | Record Android installation outcomes |
 | `POST /api/sessions/{id}/feedback` | Device bearer token | Submit tester feedback |
 | `GET /health` | Public | Service health probe |
 
@@ -164,14 +170,14 @@ See [SECURITY.md](SECURITY.md) for reporting and deployment guidance.
 - Dashboard and companion updates use polling rather than Azure Web PubSub.
 - The developer access key is a single shared bootstrap secret, not user-level identity or RBAC.
 - APK validation checks the ZIP/APK header and hash, but does not yet verify Android signing certificates or scan for malware.
-- The target application must include a future diagnostics SDK to automatically report its own logs and crashes.
+- The target application must include the opt-in Flutter diagnostics package to report its private runtime errors; Android does not allow the companion to read another app's logcat.
 
 ## Roadmap
 
 ### Reliability and scale
 
 - Azure Blob Storage for artifacts with managed-identity authorization.
-- Azure Table Storage or Cosmos DB for durable sessions, devices, builds, and events.
+- Durable Azure storage for session and authorization metadata (diagnostic events are already archived in Table Storage).
 - Azure Web PubSub with HTTPS polling fallback.
 - Idempotent uploads, resumable large-file transfer, retention policies, and audit logs.
 
@@ -184,8 +190,8 @@ See [SECURITY.md](SECURITY.md) for reporting and deployment guidance.
 
 ### Diagnostics
 
-- Android diagnostics SDK for structured logs, non-fatal exceptions, crashes, and ANRs.
-- Redacted HTTP breadcrumbs, device/app metadata, and offline event buffering.
+- Native Android SDK and Android 11+ historical exit/ANR ingestion.
+- Redacted HTTP breadcrumbs and persistent offline event buffering.
 - Screenshot annotation, voice/text feedback, and source-line navigation.
 - Notifications and issue integrations for GitHub, Azure Boards, and Jira.
 

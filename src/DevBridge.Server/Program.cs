@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
 using DevBridge.Models;
 using DevBridge.Options;
 using DevBridge.Services;
@@ -13,7 +15,10 @@ var maximumUploadBytes = builder.Configuration
     .GetValue<int>(nameof(DevBridgeOptions.MaximumApkMegabytes), 500) * 1024L * 1024L;
 builder.Services.Configure<FormOptions>(o => o.MultipartBodyLengthLimit = maximumUploadBytes);
 builder.WebHost.ConfigureKestrel(o => o.Limits.MaxRequestBodySize = maximumUploadBytes);
+builder.Services.AddApplicationInsightsTelemetry();
 builder.Services.AddSingleton<TokenService>();
+builder.Services.AddSingleton<DiagnosticArchiveService>();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<DiagnosticArchiveService>());
 builder.Services.AddSingleton<SessionStore>();
 builder.Services.AddSingleton<NetworkAddressService>();
 builder.Services.AddHostedService<SessionCleanupService>();
@@ -21,7 +26,19 @@ builder.Services.AddHostedService<SessionCleanupService>();
 var app = builder.Build();
 app.UseDefaultFiles();
 app.UseStaticFiles();
-app.MapGet("/health", () => Results.Ok(new { status = "healthy", utc = DateTimeOffset.UtcNow }));
+app.MapGet("/health", (DiagnosticArchiveService archive) => Results.Ok(new
+{
+    status = "healthy",
+    utc = DateTimeOffset.UtcNow,
+    diagnosticsArchive = new
+    {
+        archive.Enabled,
+        archive.Initialized,
+        archive.ArchivedCount,
+        archive.FailedCount,
+        archive.LastFailureAt
+    }
+}));
 
 app.MapPost("/api/sessions", (CreateSessionRequest body, HttpRequest request, SessionStore store,
     TokenService tokens, NetworkAddressService addresses, IOptions<DevBridgeOptions> options) =>
@@ -81,7 +98,8 @@ app.MapPost("/api/sessions/{sessionId:guid}/pair", (Guid sessionId, PairDeviceRe
             Name = name,
             TokenHash = tokens.Hash(rawToken),
             Platform = string.IsNullOrWhiteSpace(body.Platform) ? "Android" : body.Platform.Trim(),
-            PlatformVersion = body.PlatformVersion?.Trim()
+            PlatformVersion = body.PlatformVersion?.Trim(),
+            Context = CleanContext(body.Context)
         };
         session.Devices[device.Id] = device;
         session.PairingConsumed = true;
@@ -94,6 +112,25 @@ app.MapGet("/api/sessions/{sessionId:guid}/dashboard", (Guid sessionId, HttpRequ
 {
     if (!store.TryGet(sessionId, out var session)) return Results.NotFound();
     if (!tokens.Verify(request.Headers["X-Dashboard-Token"].FirstOrDefault(), session.DashboardTokenHash)) return Results.Unauthorized();
+    var events = session.Events.ToArray();
+    var issues = events
+        .Where(x => x.Level is "error" or "fatal" || x.Category is "crash" or "anr" or "performance" or "installation")
+        .GroupBy(x => string.IsNullOrWhiteSpace(x.Fingerprint) ? $"{x.Category}:{x.EventType}:{x.Message}" : x.Fingerprint)
+        .Select(group => new
+        {
+            fingerprint = group.Key,
+            level = group.Any(x => x.Level == "fatal") ? "fatal" : group.Any(x => x.Level == "error") ? "error" : group.First().Level,
+            category = group.First().Category,
+            eventType = group.First().EventType,
+            message = group.First().Message,
+            count = group.Count(),
+            affectedDevices = group.Select(x => x.DeviceId).Distinct().Count(),
+            firstSeenAt = group.Min(x => x.OccurredAt),
+            lastSeenAt = group.Max(x => x.OccurredAt),
+            latest = group.OrderByDescending(x => x.OccurredAt).First()
+        })
+        .OrderByDescending(x => x.lastSeenAt)
+        .Take(100);
     return Results.Ok(new
     {
         session.Id,
@@ -104,9 +141,17 @@ app.MapGet("/api/sessions/{sessionId:guid}/dashboard", (Guid sessionId, HttpRequ
         session.PairingExpiresAt,
         session.ExpiresAt,
         session.PairingConsumed,
-        devices = session.Devices.Values.OrderByDescending(x => x.LastSeenAt).Select(x => new { x.Id, x.Name, x.Platform, x.PlatformVersion, x.PairedAt, x.LastSeenAt }),
+        devices = session.Devices.Values.OrderByDescending(x => x.LastSeenAt).Select(x => new { x.Id, x.Name, x.Platform, x.PlatformVersion, x.Context, x.PairedAt, x.LastSeenAt }),
         builds = session.Builds.Values.OrderByDescending(x => x.UploadedAt).Select(ToBuild),
-        events = session.Events.Reverse().Take(200)
+        events = events.Reverse().Take(300),
+        issues,
+        summary = new
+        {
+            crashes = events.Count(x => x.Category == "crash"),
+            anrs = events.Count(x => x.Category == "anr"),
+            performanceAlerts = events.Count(x => x.Category == "performance"),
+            installFailures = events.Count(x => x.Category == "installation" && x.Level == "error")
+        }
     });
 });
 
@@ -122,8 +167,48 @@ app.MapPost("/api/sessions/{sessionId:guid}/events", (Guid sessionId, DeviceEven
     if (!AuthenticateDevice(sessionId, request, store, tokens, out var session, out var device)) return Results.Unauthorized();
     if (string.IsNullOrWhiteSpace(body.Message) || body.Message.Length > 4_000) return Results.BadRequest(new { error = "Message is required and cannot exceed 4,000 characters." });
     device.LastSeenAt = DateTimeOffset.UtcNow;
-    store.AddEvent(session, new DeviceEvent(Guid.NewGuid(), device.Id, device.Name, Clean(body.Level, "info", 20), Clean(body.Category, "app", 40),
-        body.Message.Trim(), Truncate(body.Details, 20_000), body.OccurredAt ?? DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
+    store.AddEvent(session, BuildEvent(device, body.Level, body.Category, body.Category, body.Message, body.Details,
+        null, null, null, null, null, null, body.OccurredAt));
+    return Results.Accepted();
+});
+
+app.MapPost("/api/sessions/{sessionId:guid}/diagnostics/batch", (Guid sessionId, DiagnosticBatchRequest body,
+    HttpRequest request, SessionStore store, TokenService tokens) =>
+{
+    if (!AuthenticateDevice(sessionId, request, store, tokens, out var session, out var device)) return Results.Unauthorized();
+    if (body.Events is null || body.Events.Count is 0 or > 100)
+        return Results.BadRequest(new { error = "A batch must contain between 1 and 100 diagnostic events." });
+    foreach (var item in body.Events)
+    {
+        if (string.IsNullOrWhiteSpace(item.Message) || item.Message.Length > 4_000)
+            return Results.BadRequest(new { error = "Every event needs a message of 4,000 characters or fewer." });
+    }
+    device.LastSeenAt = DateTimeOffset.UtcNow;
+    foreach (var item in body.Events)
+    {
+        store.AddEvent(session, BuildEvent(device, item.Level, item.Category, item.EventType, item.Message,
+            item.Details, item.StackTrace, item.Fingerprint, item.Screen, item.BuildId, item.Metrics, item.Context,
+            item.OccurredAt));
+    }
+    return Results.Accepted(value: new { accepted = body.Events.Count });
+});
+
+app.MapPost("/api/sessions/{sessionId:guid}/installations", (Guid sessionId, InstallationResultRequest body,
+    HttpRequest request, SessionStore store, TokenService tokens) =>
+{
+    if (!AuthenticateDevice(sessionId, request, store, tokens, out var session, out var device)) return Results.Unauthorized();
+    if (!session.Builds.ContainsKey(body.BuildId)) return Results.NotFound(new { error = "Build not found." });
+    var status = Clean(body.Status, "unknown", 40);
+    var success = status is "success" or "pending_user_action" or "permission_required" or "started";
+    var context = new Dictionary<string, string>
+    {
+        ["status"] = status,
+        ["packageName"] = Truncate(body.PackageName, 150) ?? string.Empty,
+        ["statusCode"] = body.StatusCode?.ToString() ?? string.Empty
+    };
+    store.AddEvent(session, BuildEvent(device, success ? "info" : "error", "installation", status,
+        body.Message, body.Details, null, $"installation:{status}:{body.PackageName}", null, body.BuildId,
+        null, context, body.OccurredAt));
     return Results.Accepted();
 });
 
@@ -203,9 +288,51 @@ static bool AuthenticateDevice(Guid id, HttpRequest request, SessionStore store,
     return device is not null;
 }
 static void AddEvent(SessionStore store, TestSession session, ConnectedDevice device, string level, string category, string message, string? details) =>
-    store.AddEvent(session, new DeviceEvent(Guid.NewGuid(), device.Id, device.Name, level, category, message, details, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
+    store.AddEvent(session, BuildEvent(device, level, category, category, message, details, null, null, null, null, null, null, null));
 static BuildResponse ToBuild(PublishedBuild x) => new(x.Id, x.OriginalFileName, x.VersionName, x.VersionCode, x.SizeBytes, x.Sha256, x.UploadedAt);
 static string Clean(string? value, string fallback, int max) { var result = string.IsNullOrWhiteSpace(value) ? fallback : value.Trim().ToLowerInvariant(); return result.Length <= max ? result : result[..max]; }
 static string? Truncate(string? value, int max) => value is { Length: > 0 } ? value[..Math.Min(value.Length, max)] : value;
+static IReadOnlyDictionary<string, string> CleanContext(IReadOnlyDictionary<string, string>? source) =>
+    source?.Take(40).ToDictionary(x => Truncate(x.Key, 60) ?? string.Empty, x => Truncate(Redact(x.Value), 500) ?? string.Empty)
+    ?? new Dictionary<string, string>();
+static IReadOnlyDictionary<string, double> CleanMetrics(IReadOnlyDictionary<string, double>? source) =>
+    source?.Where(x => double.IsFinite(x.Value)).Take(40).ToDictionary(x => Truncate(x.Key, 60) ?? string.Empty, x => x.Value)
+    ?? new Dictionary<string, double>();
+static DeviceEvent BuildEvent(ConnectedDevice device, string? level, string? category, string? eventType,
+    string message, string? details, string? stackTrace, string? fingerprint, string? screen, Guid? buildId,
+    IReadOnlyDictionary<string, double>? metrics, IReadOnlyDictionary<string, string>? context, DateTimeOffset? occurredAt)
+{
+    var cleanCategory = Clean(category, "app", 40);
+    var cleanType = Clean(eventType, cleanCategory, 60);
+    var cleanMessage = Truncate(Redact(message.Trim()), 4_000) ?? "Diagnostic event";
+    var cleanStack = Truncate(Redact(stackTrace), 30_000);
+    var computedFingerprint = string.IsNullOrWhiteSpace(fingerprint)
+        ? Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{cleanCategory}|{cleanType}|{cleanMessage}|{cleanStack?.Split('\n').FirstOrDefault()}")))[..24].ToLowerInvariant()
+        : Clean(fingerprint, "event", 160);
+    return new DeviceEvent
+    {
+        Id = Guid.NewGuid(),
+        DeviceId = device.Id,
+        DeviceName = device.Name,
+        Level = Clean(level, "info", 20),
+        Category = cleanCategory,
+        EventType = cleanType,
+        Message = cleanMessage,
+        Details = Truncate(Redact(details), 20_000),
+        StackTrace = cleanStack,
+        Fingerprint = computedFingerprint,
+        Screen = Truncate(screen, 200),
+        BuildId = buildId,
+        Metrics = CleanMetrics(metrics),
+        Context = CleanContext(context),
+        OccurredAt = occurredAt ?? DateTimeOffset.UtcNow,
+        ReceivedAt = DateTimeOffset.UtcNow
+    };
+}
+static string? Redact(string? value)
+{
+    if (string.IsNullOrEmpty(value)) return value;
+    return Regex.Replace(value, "(?i)(authorization|cookie|token|password|secret|api[-_]?key)(\\s*[:=]\\s*)([^\\s,;]+)", "$1$2[REDACTED]");
+}
 
 public partial class Program;

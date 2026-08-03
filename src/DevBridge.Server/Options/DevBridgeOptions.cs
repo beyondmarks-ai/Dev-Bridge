@@ -9,4 +9,6 @@ public sealed class DevBridgeOptions
     public int SessionLifetimeHours { get; set; } = 8;
     public int MaximumApkMegabytes { get; set; } = 500;
     public string ArtifactPath { get; set; } = "Data/Artifacts";
+    public string StorageAccountName { get; set; } = string.Empty;
+    public string DiagnosticTableName { get; set; } = "DevBridgeDiagnostics";
 }

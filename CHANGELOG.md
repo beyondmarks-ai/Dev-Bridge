@@ -6,9 +6,19 @@ All notable changes are documented in this file. The project follows Semantic Ve
 
 ### Planned
 
-- Durable Azure storage adapters.
 - Real-time Web PubSub transport.
-- Android diagnostics SDK.
+- Durable session metadata and Blob-backed artifacts.
+
+## [0.2.0] - 2026-08-03
+
+### Added
+
+- Structured diagnostic batch and Android installation-result endpoints.
+- Crash, ANR, performance, and installation issue fingerprinting and grouping.
+- Azure Table Storage archival through the web app managed identity.
+- Application Insights and Log Analytics infrastructure.
+- Professional issue dashboard, device context, metrics, stack traces, and live timeline.
+- Server-side credential-pattern redaction and bounded diagnostic ingestion.
 
 ## [0.1.0] - 2026-08-03
 
