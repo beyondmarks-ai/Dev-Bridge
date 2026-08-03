@@ -1,0 +1,6 @@
+.start { align-items: flex-start; }
+.start form { display: grid; width: min(430px, 100%); min-width: 0; gap: 12px; }
+.start label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
+.apk-picker { position: relative; display: grid !important; place-items: center; min-height: 82px; border: 1px dashed #467563; border-radius: 12px; background: #5df2ad0b; color: var(--green) !important; cursor: pointer; font-weight: 800; }
+.apk-picker input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.selected-file { overflow-wrap: anywhere; color: var(--muted); font-size: 12px; text-align: center; }

@@ -1,0 +1,21 @@
+**/bin/
+**/obj/
+**/Data/
+*.user
+*.log
+.vs/
+.idea/
+.deploy/
+.azure/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+appsettings.Production.json
+appsettings.*.local.json
+*.PublishSettings
+*.pfx
+*.p12
+*.snk
+secrets.json
