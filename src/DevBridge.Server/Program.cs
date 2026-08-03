@@ -19,14 +19,17 @@ builder.Services.AddApplicationInsightsTelemetry();
 builder.Services.AddSingleton<TokenService>();
 builder.Services.AddSingleton<DiagnosticArchiveService>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<DiagnosticArchiveService>());
+builder.Services.AddSingleton<SessionPersistenceService>();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<SessionPersistenceService>());
 builder.Services.AddSingleton<SessionStore>();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<SessionStore>());
 builder.Services.AddSingleton<NetworkAddressService>();
 builder.Services.AddHostedService<SessionCleanupService>();
 
 var app = builder.Build();
 app.UseDefaultFiles();
 app.UseStaticFiles();
-app.MapGet("/health", (DiagnosticArchiveService archive) => Results.Ok(new
+app.MapGet("/health", (DiagnosticArchiveService archive, SessionPersistenceService persistence) => Results.Ok(new
 {
     status = "healthy",
     utc = DateTimeOffset.UtcNow,
@@ -37,6 +40,15 @@ app.MapGet("/health", (DiagnosticArchiveService archive) => Results.Ok(new
         archive.ArchivedCount,
         archive.FailedCount,
         archive.LastFailureAt
+    },
+    sessionPersistence = new
+    {
+        persistence.Enabled,
+        persistence.Initialized,
+        persistence.SavedCount,
+        persistence.FailedCount,
+        persistence.RestoredCount,
+        persistence.LoadFailureCount
     }
 }));
 
@@ -104,6 +116,7 @@ app.MapPost("/api/sessions/{sessionId:guid}/pair", (Guid sessionId, PairDeviceRe
         session.Devices[device.Id] = device;
         session.PairingConsumed = true;
         AddEvent(store, session, device, "info", "connection", "Device paired", null);
+        store.Touch(session);
         return Results.Ok(new PairDeviceResponse(device.Id, rawToken, session.Id));
     }
 });
@@ -175,7 +188,7 @@ app.MapPost("/api/sessions/{sessionId:guid}/events", (Guid sessionId, DeviceEven
 app.MapPost("/api/sessions/{sessionId:guid}/diagnostics/batch", (Guid sessionId, DiagnosticBatchRequest body,
     HttpRequest request, SessionStore store, TokenService tokens) =>
 {
-    if (!AuthenticateDevice(sessionId, request, store, tokens, out var session, out var device)) return Results.Unauthorized();
+    if (!AuthenticateTelemetry(sessionId, request, store, tokens, out var session, out var device)) return Results.Unauthorized();
     if (body.Events is null || body.Events.Count is 0 or > 100)
         return Results.BadRequest(new { error = "A batch must contain between 1 and 100 diagnostic events." });
     foreach (var item in body.Events)
@@ -253,6 +266,7 @@ app.MapPost("/api/sessions/{sessionId:guid}/builds", async (Guid sessionId, Http
     await using (var input = File.OpenRead(path)) hash = Convert.ToHexString(await SHA256.HashDataAsync(input, ct));
     var build = new PublishedBuild { Id = buildId, OriginalFileName = Path.GetFileName(file.FileName), StoredPath = path, VersionName = versionName, VersionCode = versionCode, SizeBytes = file.Length, Sha256 = hash };
     session.Builds[build.Id] = build;
+    store.Touch(session);
     foreach (var device in session.Devices.Values) AddEvent(store, session, device, "info", "build", $"Build {versionName} is available", null);
     return Results.Ok(ToBuild(build));
 }).DisableAntiforgery();
@@ -266,6 +280,102 @@ app.MapPost("/api/sessions/{sessionId:guid}/builds/{buildId:guid}/ticket", (Guid
     var expires = DateTimeOffset.UtcNow.AddMinutes(2);
     store.AddTicket(ticket, new DownloadTicket(sessionId, buildId, device.Id, expires));
     return Results.Ok(new DownloadTicketResponse($"{addresses.Resolve(request)}/api/downloads/{Uri.EscapeDataString(ticket)}", expires));
+});
+
+app.MapPost("/api/sessions/{sessionId:guid}/builds/{buildId:guid}/sdk-ticket", (Guid sessionId, Guid buildId,
+    HttpRequest request, SessionStore store, TokenService tokens) =>
+{
+    if (!AuthenticateDevice(sessionId, request, store, tokens, out var session, out var device)) return Results.Unauthorized();
+    if (!session.Builds.ContainsKey(buildId)) return Results.NotFound();
+    var raw = tokens.CreateToken();
+    var expires = DateTimeOffset.UtcNow.AddMinutes(2);
+    store.AddSdkTicket(raw, new SdkHandoffTicket(session.Id, buildId, device.Id, expires));
+    return Results.Ok(new SdkHandoffResponse(raw, expires));
+});
+
+app.MapPost("/api/sdk/exchange", (SdkExchangeRequest body, HttpRequest request, SessionStore store,
+    TokenService tokens, NetworkAddressService addresses) =>
+{
+    if (string.IsNullOrWhiteSpace(body.HandoffToken) ||
+        !store.TryConsumeSdkTicket(body.HandoffToken, out var ticket) ||
+        !store.TryGet(ticket.SessionId, out var session) ||
+        !session.Devices.TryGetValue(ticket.DeviceId, out var device) ||
+        !session.Builds.ContainsKey(ticket.BuildId)) return Results.Unauthorized();
+    var rawToken = tokens.CreateToken();
+    var client = new SdkClient
+    {
+        Id = Guid.NewGuid(),
+        DeviceId = device.Id,
+        BuildId = ticket.BuildId,
+        TokenHash = tokens.Hash(rawToken)
+    };
+    session.SdkClients[client.Id] = client;
+    store.Touch(session);
+    return Results.Ok(new SdkExchangeResponse(addresses.Resolve(request), session.Id, device.Id, ticket.BuildId,
+        rawToken, session.ExpiresAt));
+});
+
+app.MapPost("/api/sessions/{sessionId:guid}/attachments", async (Guid sessionId, HttpRequest request,
+    SessionStore store, TokenService tokens, SessionPersistenceService persistence,
+    IOptions<DevBridgeOptions> options, CancellationToken cancellationToken) =>
+{
+    if (!AuthenticateTelemetry(sessionId, request, store, tokens, out var session, out var device)) return Results.Unauthorized();
+    if (!request.HasFormContentType) return Results.BadRequest(new { error = "Multipart form data is required." });
+    var form = await request.ReadFormAsync(cancellationToken);
+    var file = form.Files.GetFile("file");
+    if (file is null || file.Length == 0) return Results.BadRequest(new { error = "A non-empty attachment is required." });
+    if (file.Length > options.Value.MaximumAttachmentMegabytes * 1024L * 1024L)
+        return Results.BadRequest(new { error = "Attachment is too large." });
+    var extension = Path.GetExtension(file.FileName).ToLowerInvariant();
+    var allowed = new Dictionary<string, string>
+    {
+        [".png"] = "image/png",
+        [".jpg"] = "image/jpeg",
+        [".jpeg"] = "image/jpeg",
+        [".mp4"] = "video/mp4",
+        [".webm"] = "video/webm",
+        [".txt"] = "text/plain"
+    };
+    if (!allowed.TryGetValue(extension, out var contentType))
+        return Results.BadRequest(new { error = "Only PNG, JPEG, MP4, WebM, and text attachments are supported." });
+    Guid? buildId = Guid.TryParse(form["buildId"], out var parsedBuild) ? parsedBuild : null;
+    if (buildId is not null && !session.Builds.ContainsKey(buildId.Value)) return Results.BadRequest(new { error = "Build not found." });
+    var id = Guid.NewGuid();
+    var kind = Clean(form["kind"], extension is ".mp4" or ".webm" ? "recording" : "screenshot", 30);
+    var blobName = $"attachments/{session.Id:N}/{id:N}{extension}";
+    await using (var stream = file.OpenReadStream())
+        await persistence.UploadAttachmentAsync(blobName, stream, contentType, cancellationToken);
+    var attachment = new DiagnosticAttachment
+    {
+        Id = id,
+        DeviceId = device.Id,
+        BuildId = buildId,
+        Kind = kind,
+        FileName = Path.GetFileName(file.FileName),
+        BlobName = blobName,
+        ContentType = contentType,
+        SizeBytes = file.Length
+    };
+    session.Attachments[id] = attachment;
+    store.Touch(session);
+    store.AddEvent(session, BuildEvent(device, "feedback", "attachment", $"{kind}_attached",
+        $"Tester attached {kind} evidence.", null, null, $"attachment:{id:N}", null, buildId,
+        new Dictionary<string, double> { ["sizeBytes"] = file.Length },
+        new Dictionary<string, string> { ["attachmentId"] = id.ToString("D"), ["contentType"] = contentType }, null));
+    return Results.Ok(new AttachmentResponse(id, kind, attachment.FileName, contentType, file.Length, attachment.CreatedAt));
+}).DisableAntiforgery();
+
+app.MapGet("/api/sessions/{sessionId:guid}/attachments/{attachmentId:guid}", async (Guid sessionId, Guid attachmentId,
+    HttpRequest request, SessionStore store, TokenService tokens, SessionPersistenceService persistence,
+    CancellationToken cancellationToken) =>
+{
+    if (!store.TryGet(sessionId, out var session) ||
+        !tokens.Verify(request.Headers["X-Dashboard-Token"].FirstOrDefault(), session.DashboardTokenHash))
+        return Results.Unauthorized();
+    if (!session.Attachments.TryGetValue(attachmentId, out var attachment)) return Results.NotFound();
+    var content = await persistence.OpenAttachmentAsync(attachment.BlobName, cancellationToken);
+    return content is null ? Results.NotFound() : Results.Stream(content.Value.Content, content.Value.ContentType,
+        attachment.FileName, enableRangeProcessing: true);
 });
 
 app.MapGet("/api/downloads/{ticket}", (string ticket, SessionStore store) =>
@@ -286,6 +396,19 @@ static bool AuthenticateDevice(Guid id, HttpRequest request, SessionStore store,
     var raw = auth?.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) == true ? auth[7..] : null;
     device = session.Devices.Values.FirstOrDefault(x => tokens.Verify(raw, x.TokenHash))!;
     return device is not null;
+}
+static bool AuthenticateTelemetry(Guid id, HttpRequest request, SessionStore store, TokenService tokens,
+    out TestSession session, out ConnectedDevice device)
+{
+    if (AuthenticateDevice(id, request, store, tokens, out session, out device)) return true;
+    device = null!;
+    if (!store.TryGet(id, out session!)) return false;
+    var auth = request.Headers.Authorization.FirstOrDefault();
+    var raw = auth?.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) == true ? auth[7..] : null;
+    var sdk = session.SdkClients.Values.FirstOrDefault(x => tokens.Verify(raw, x.TokenHash));
+    if (sdk is null || !session.Devices.TryGetValue(sdk.DeviceId, out device!)) return false;
+    sdk.LastSeenAt = DateTimeOffset.UtcNow;
+    return true;
 }
 static void AddEvent(SessionStore store, TestSession session, ConnectedDevice device, string level, string category, string message, string? details) =>
     store.AddEvent(session, BuildEvent(device, level, category, category, message, details, null, null, null, null, null, null, null));

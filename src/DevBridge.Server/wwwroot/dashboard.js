@@ -105,7 +105,7 @@ function renderIssues(issues) {
 }
 
 function renderEvents(events) {
-  $('events').innerHTML = events.length ? events.map(item => `<div class="event ${esc(item.level)}" data-fingerprint="${esc(item.fingerprint || '')}"><i></i><div><header><strong>${esc(item.eventType || item.category)}</strong><small>${esc(item.deviceName)} · ${time(item.occurredAt)}</small></header><p>${esc(item.message)}</p>${item.screen ? `<span class="context-chip">${esc(item.screen)}</span>` : ''}${metrics(item.metrics)}${item.details ? `<pre>${esc(item.details)}</pre>` : ''}${item.stackTrace ? `<details><summary>Stack trace</summary><pre>${esc(item.stackTrace)}</pre></details>` : ''}</div></div>`).join('') : '<div class="empty">Events will appear here.</div>';
+  $('events').innerHTML = events.length ? events.map(item => `<div class="event ${esc(item.level)}" data-fingerprint="${esc(item.fingerprint || '')}"><i></i><div><header><strong>${esc(item.eventType || item.category)}</strong><small>${esc(item.deviceName)} · ${time(item.occurredAt)}</small></header><p>${esc(item.message)}</p>${item.screen ? `<span class="context-chip">${esc(item.screen)}</span>` : ''}${metrics(item.metrics)}${attachment(item.context)}${item.details ? `<pre>${esc(item.details)}</pre>` : ''}${item.stackTrace ? `<details><summary>Stack trace</summary><pre>${esc(item.stackTrace)}</pre></details>` : ''}</div></div>`).join('') : '<div class="empty">Events will appear here.</div>';
 }
 
 function focusEvent(fingerprint) {
@@ -119,6 +119,18 @@ function focusEvent(fingerprint) {
 function metrics(values) {
   const entries = Object.entries(values || {});
   return entries.length ? `<div class="metric-chips">${entries.map(([key, value]) => `<span>${esc(key)} <b>${Number(value).toFixed(1)}</b></span>`).join('')}</div>` : '';
+}
+
+function attachment(context) {
+  return context?.attachmentId ? `<button class="attachment-button" type="button" onclick="openAttachment('${esc(context.attachmentId)}')">Open ${esc(context.contentType?.startsWith('video/') ? 'recording' : 'screenshot')}</button>` : '';
+}
+
+async function openAttachment(id) {
+  const response = await fetch(`/api/sessions/${state.id}/attachments/${id}`, { headers: { 'X-Dashboard-Token': state.token } });
+  if (!response.ok) return alert('Attachment is unavailable or the session expired.');
+  const url = URL.createObjectURL(await response.blob());
+  window.open(url, '_blank', 'noopener');
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
 function message(text, error = false) { $('upload-message').textContent = text; $('upload-message').classList.remove('hidden'); $('upload-message').classList.toggle('error', error); }

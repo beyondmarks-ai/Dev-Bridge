@@ -16,7 +16,32 @@ public sealed class TestSession
     public bool PairingConsumed { get; set; }
     public ConcurrentDictionary<Guid, ConnectedDevice> Devices { get; } = new();
     public ConcurrentDictionary<Guid, PublishedBuild> Builds { get; } = new();
+    public ConcurrentDictionary<Guid, SdkClient> SdkClients { get; } = new();
+    public ConcurrentDictionary<Guid, DiagnosticAttachment> Attachments { get; } = new();
     public ConcurrentQueue<DeviceEvent> Events { get; } = new();
+}
+
+public sealed class SdkClient
+{
+    public required Guid Id { get; init; }
+    public required Guid DeviceId { get; init; }
+    public required Guid BuildId { get; init; }
+    public required string TokenHash { get; init; }
+    public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset LastSeenAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class DiagnosticAttachment
+{
+    public required Guid Id { get; init; }
+    public required Guid DeviceId { get; init; }
+    public Guid? BuildId { get; init; }
+    public required string Kind { get; init; }
+    public required string FileName { get; init; }
+    public required string BlobName { get; init; }
+    public required string ContentType { get; init; }
+    public required long SizeBytes { get; init; }
+    public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
 }
 
 public sealed class ConnectedDevice
@@ -63,3 +88,4 @@ public sealed class DeviceEvent
     public required DateTimeOffset ReceivedAt { get; init; }
 }
 public sealed record DownloadTicket(Guid SessionId, Guid BuildId, Guid DeviceId, DateTimeOffset ExpiresAt);
+public sealed record SdkHandoffTicket(Guid SessionId, Guid BuildId, Guid DeviceId, DateTimeOffset ExpiresAt);

@@ -15,3 +15,7 @@ public sealed record CreateSessionResponse(Guid SessionId, string DashboardToken
 public sealed record PairDeviceResponse(Guid DeviceId, string DeviceToken, Guid SessionId);
 public sealed record BuildResponse(Guid BuildId, string FileName, string VersionName, long VersionCode, long SizeBytes, string Sha256, DateTimeOffset UploadedAt);
 public sealed record DownloadTicketResponse(string DownloadUrl, DateTimeOffset ExpiresAt);
+public sealed record SdkHandoffResponse(string HandoffToken, DateTimeOffset ExpiresAt);
+public sealed record SdkExchangeRequest(string HandoffToken);
+public sealed record SdkExchangeResponse(string BaseUrl, Guid SessionId, Guid DeviceId, Guid BuildId, string SdkToken, DateTimeOffset SessionExpiresAt);
+public sealed record AttachmentResponse(Guid AttachmentId, string Kind, string FileName, string ContentType, long SizeBytes, DateTimeOffset CreatedAt);

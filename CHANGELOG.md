@@ -7,7 +7,18 @@ All notable changes are documented in this file. The project follows Semantic Ve
 ### Planned
 
 - Real-time Web PubSub transport.
-- Durable session metadata and Blob-backed artifacts.
+- Blob-backed APK artifacts and multi-instance state coordination.
+
+## [0.3.0] - 2026-08-03
+
+### Added
+
+- One-use SDK handoff exchange with separate build-scoped telemetry credentials.
+- Azure Blob session snapshots and automatic active-session restoration.
+- Restoration of recent diagnostic timelines from Azure Table Storage.
+- Authenticated screenshot and recording upload/download endpoints.
+- Attachment events and protected dashboard viewing.
+- Session-persistence health counters.
 
 ## [0.2.0] - 2026-08-03
 

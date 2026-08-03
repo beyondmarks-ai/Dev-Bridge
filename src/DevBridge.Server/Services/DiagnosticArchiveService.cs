@@ -35,6 +35,45 @@ public sealed class DiagnosticArchiveService : BackgroundService
 
     public void Enqueue(Guid sessionId, DeviceEvent item) => _queue.Writer.TryWrite(new ArchivedDiagnostic(sessionId, item));
 
+    public async Task<IReadOnlyList<DeviceEvent>> LoadRecentAsync(Guid sessionId, int limit, CancellationToken cancellationToken)
+    {
+        if (_table is null) return [];
+        if (!Initialized)
+        {
+            await _table.CreateIfNotExistsAsync(cancellationToken);
+            Initialized = true;
+        }
+        var events = new List<DeviceEvent>();
+        var filter = TableClient.CreateQueryFilter($"PartitionKey eq {sessionId.ToString("N")}");
+        await foreach (var entity in _table.QueryAsync<TableEntity>(
+            filter, maxPerPage: Math.Min(limit, 100), cancellationToken: cancellationToken))
+        {
+            if (!Guid.TryParse(entity.GetString("EventId"), out var eventId) ||
+                !Guid.TryParse(entity.GetString("DeviceId"), out var deviceId)) continue;
+            events.Add(new DeviceEvent
+            {
+                Id = eventId,
+                DeviceId = deviceId,
+                DeviceName = entity.GetString("DeviceName") ?? "Restored device",
+                Level = entity.GetString("Level") ?? "info",
+                Category = entity.GetString("Category") ?? "app",
+                EventType = entity.GetString("EventType") ?? "event",
+                Message = entity.GetString("Message") ?? "Diagnostic event",
+                Details = EmptyToNull(entity.GetString("Details")),
+                StackTrace = EmptyToNull(entity.GetString("StackTrace")),
+                Fingerprint = EmptyToNull(entity.GetString("Fingerprint")),
+                Screen = EmptyToNull(entity.GetString("Screen")),
+                BuildId = Guid.TryParse(entity.GetString("BuildId"), out var buildId) ? buildId : null,
+                Metrics = JsonSerializer.Deserialize<Dictionary<string, double>>(entity.GetString("MetricsJson") ?? "{}") ?? [],
+                Context = JsonSerializer.Deserialize<Dictionary<string, string>>(entity.GetString("ContextJson") ?? "{}") ?? [],
+                OccurredAt = entity.GetDateTimeOffset("OccurredAt") ?? DateTimeOffset.UtcNow,
+                ReceivedAt = entity.GetDateTimeOffset("ReceivedAt") ?? DateTimeOffset.UtcNow
+            });
+            if (events.Count >= limit) break;
+        }
+        return events.OrderBy(x => x.OccurredAt).ToList();
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (_table is null) return;
@@ -85,4 +124,6 @@ public sealed class DiagnosticArchiveService : BackgroundService
             }
         }
     }
+
+    private static string? EmptyToNull(string? value) => string.IsNullOrEmpty(value) ? null : value;
 }

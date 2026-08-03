@@ -89,6 +89,8 @@ resource app 'Microsoft.Web/sites@2025-03-01' = {
         { name: 'DevBridge__ArtifactPath', value: '/home/data/artifacts' }
         { name: 'DevBridge__StorageAccountName', value: storage.name }
         { name: 'DevBridge__DiagnosticTableName', value: 'DevBridgeDiagnostics' }
+        { name: 'DevBridge__StorageContainerName', value: 'devbridge-artifacts' }
+        { name: 'DevBridge__MaximumAttachmentMegabytes', value: '100' }
         { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: insights.properties.ConnectionString }
         { name: 'WEBSITE_RUN_FROM_PACKAGE', value: '1' }
       ]

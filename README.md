@@ -21,6 +21,9 @@ DevBridge removes ad-hoc APK sharing through messaging apps, removable drives, a
 - Automatic issue fingerprinting, occurrence counts, and affected-device grouping.
 - Secret redaction and managed-identity archival to Azure Table Storage.
 - Application Insights and Log Analytics infrastructure for service monitoring.
+- One-use, two-minute SDK enrollment handoffs with separate build-scoped telemetry tokens.
+- Azure Blob-backed session snapshots that restore devices, builds, SDK clients, and attachment metadata after restarts.
+- Authenticated PNG/JPEG screenshot and MP4/WebM recording attachments.
 - Automatic session and artifact expiry.
 - Reusable Bicep infrastructure and PowerShell deployment scripts.
 
@@ -147,6 +150,10 @@ Publish the server using the web-app name returned by the deployment:
 | `POST /api/sessions/{id}/events` | Device bearer token | Submit structured diagnostics |
 | `POST /api/sessions/{id}/diagnostics/batch` | Device bearer token | Submit crash/performance event batches |
 | `POST /api/sessions/{id}/installations` | Device bearer token | Record Android installation outcomes |
+| `POST /api/sessions/{id}/builds/{buildId}/sdk-ticket` | Device bearer token | Create one-use target SDK handoff |
+| `POST /api/sdk/exchange` | One-use SDK handoff | Issue a build-scoped SDK token |
+| `POST /api/sessions/{id}/attachments` | Device or SDK token | Upload diagnostic evidence |
+| `GET /api/sessions/{id}/attachments/{attachmentId}` | Dashboard token | View protected evidence |
 | `POST /api/sessions/{id}/feedback` | Device bearer token | Submit tester feedback |
 | `GET /health` | Public | Service health probe |
 
@@ -165,7 +172,7 @@ See [SECURITY.md](SECURITY.md) for reporting and deployment guidance.
 
 ## Known limitations
 
-- Session metadata is currently held in process memory; an app restart invalidates active sessions.
+- Session snapshots are durable, but concurrent multi-instance session coordination is not yet supported.
 - APK files use App Service persistent storage rather than the provisioned Blob container.
 - Dashboard and companion updates use polling rather than Azure Web PubSub.
 - The developer access key is a single shared bootstrap secret, not user-level identity or RBAC.
@@ -177,7 +184,7 @@ See [SECURITY.md](SECURITY.md) for reporting and deployment guidance.
 ### Reliability and scale
 
 - Azure Blob Storage for artifacts with managed-identity authorization.
-- Durable Azure storage for session and authorization metadata (diagnostic events are already archived in Table Storage).
+- Multi-instance optimistic concurrency and transactional session state.
 - Azure Web PubSub with HTTPS polling fallback.
 - Idempotent uploads, resumable large-file transfer, retention policies, and audit logs.
 
