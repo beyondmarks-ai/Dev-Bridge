@@ -58,7 +58,7 @@
       </article>
 
       <article class="card test-workspace">
-        <div class="title"><div><span class="eyebrow">GUIDED AI TESTING</span><h2>Test plan & release verdict</h2></div><div class="report-actions"><span id="quality-verdict" class="pill">Incomplete</span><button id="download-report" class="secondary" type="button">Export report</button></div></div>
+        <div class="title"><div><span class="eyebrow">GUIDED & AUTOMATED AI TESTING</span><h2>Test plan & release verdict</h2></div><div class="report-actions"><span id="quality-verdict" class="pill">Incomplete</span><button id="enroll-runner" class="secondary" type="button">Connect runner</button><button id="download-report" class="secondary" type="button">Export report</button></div></div>
         <div id="quality-summary" class="quality-summary">Generate test cases, schedule them to a paired device, and collect evidence-backed results.</div>
         <form id="generate-tests-form" class="test-generator">
           <label>Feature or user journey<textarea id="test-feature" rows="3" maxlength="2000" placeholder="Example: User signs in, adds a product to cart, and completes payment" required></textarea></label>
@@ -66,6 +66,7 @@
           <button id="generate-tests-button">Generate with Azure AI</button>
         </form>
         <div id="test-message" class="message hidden"></div>
+        <div id="runner-enrollment" class="runner-enrollment hidden"><strong>One-use runner enrollment</strong><p>Start Appium locally, set these values in the runner terminal, then run <code>npm start</code>. The token expires after ten minutes and is never stored by the runner.</p><pre id="runner-command"></pre><button id="copy-runner-command" class="secondary" type="button">Copy command</button></div>
         <div class="test-columns">
           <section><h3>Test cases</h3><div id="test-cases" class="test-list"><div class="empty">No test cases yet.</div></div></section>
           <section><h3>Runs</h3><div id="test-runs" class="test-list"><div class="empty">No test runs scheduled.</div></div></section>

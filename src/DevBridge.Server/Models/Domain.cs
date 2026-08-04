@@ -32,8 +32,12 @@ public sealed class TestCase
     public required string ExpectedResult { get; init; }
     public required string Priority { get; init; }
     public bool AiGenerated { get; init; }
+    public IReadOnlyList<AutomationStep> AutomationSteps { get; init; } = [];
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
 }
+
+public sealed record AutomationStep(int Sequence, string Action, string? Target, string? Value,
+    string? Secret, string? Expected, int TimeoutSeconds, string Risk = "safe");
 
 public sealed class TestRun
 {
@@ -45,6 +49,9 @@ public sealed class TestRun
     public string? CaptureId { get; set; }
     public string? Notes { get; set; }
     public string? FailureFingerprint { get; set; }
+    public int CurrentStep { get; set; }
+    public int TotalSteps { get; set; }
+    public string? LastStepMessage { get; set; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? StartedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
@@ -141,3 +148,4 @@ public sealed class DeviceEvent
 }
 public sealed record DownloadTicket(Guid SessionId, Guid BuildId, Guid DeviceId, DateTimeOffset ExpiresAt);
 public sealed record SdkHandoffTicket(Guid SessionId, Guid BuildId, Guid DeviceId, DateTimeOffset ExpiresAt);
+public sealed record AutomationHandoffTicket(Guid SessionId, DateTimeOffset ExpiresAt);

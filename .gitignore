@@ -1,5 +1,7 @@
 **/bin/
 **/obj/
+**/node_modules/
+**/dist/
 **/Data/
 *.user
 *.log

@@ -10,6 +10,7 @@ public sealed class SessionStore : IHostedService
     private readonly ConcurrentDictionary<Guid, TestSession> _sessions = new();
     private readonly ConcurrentDictionary<string, DownloadTicket> _tickets = new();
     private readonly ConcurrentDictionary<string, SdkHandoffTicket> _sdkTickets = new();
+    private readonly ConcurrentDictionary<string, AutomationHandoffTicket> _automationTickets = new();
     public SessionStore(DiagnosticArchiveService archive, SessionPersistenceService persistence)
     {
         _archive = archive;
@@ -30,6 +31,7 @@ public sealed class SessionStore : IHostedService
     }
     public void AddTicket(string token, DownloadTicket ticket) => _tickets[token] = ticket;
     public void AddSdkTicket(string token, SdkHandoffTicket ticket) => _sdkTickets[token] = ticket;
+    public void AddAutomationTicket(string token, AutomationHandoffTicket ticket) => _automationTickets[token] = ticket;
     public bool TryConsumeSdkTicket(string token, out SdkHandoffTicket ticket)
     {
         if (_sdkTickets.TryRemove(token, out ticket!) && ticket.ExpiresAt > DateTimeOffset.UtcNow) return true;
@@ -38,6 +40,11 @@ public sealed class SessionStore : IHostedService
     public bool TryConsumeTicket(string token, out DownloadTicket ticket)
     {
         if (_tickets.TryRemove(token, out ticket!) && ticket.ExpiresAt > DateTimeOffset.UtcNow) return true;
+        ticket = null!; return false;
+    }
+    public bool TryConsumeAutomationTicket(string token, out AutomationHandoffTicket ticket)
+    {
+        if (_automationTickets.TryRemove(token, out ticket!) && ticket.ExpiresAt > DateTimeOffset.UtcNow) return true;
         ticket = null!; return false;
     }
     public void RemoveExpired()
@@ -61,6 +68,7 @@ public sealed class SessionStore : IHostedService
         }
         foreach (var x in _tickets.Where(x => x.Value.ExpiresAt <= now)) _tickets.TryRemove(x.Key, out _);
         foreach (var x in _sdkTickets.Where(x => x.Value.ExpiresAt <= now)) _sdkTickets.TryRemove(x.Key, out _);
+        foreach (var x in _automationTickets.Where(x => x.Value.ExpiresAt <= now)) _automationTickets.TryRemove(x.Key, out _);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)

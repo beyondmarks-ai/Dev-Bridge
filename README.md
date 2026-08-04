@@ -24,6 +24,8 @@ DevBridge removes ad-hoc APK sharing through messaging apps, removable drives, a
 - Azure AI-generated guided test cases that can be assigned to a paired device and build.
 - Evidence-linked pass, fail, and blocked test runs with automatic failure diagnosis in the companion.
 - Consolidated release verdict, pass rate, diagnosed-failure count, and Markdown report export.
+- One-use enrollment for a local Appium/UiAutomator2 runner that executes safety-bounded AI plans on an Android Studio emulator or dedicated device.
+- Per-step automation progress, semantic-first element lookup, explicit assertions, screenshots, APK hash verification, and automatic failure diagnosis.
 - Secret redaction and managed-identity archival to Azure Table Storage.
 - Application Insights and Log Analytics infrastructure for service monitoring.
 - One-use, two-minute SDK enrollment handoffs with separate build-scoped telemetry tokens.
@@ -173,6 +175,9 @@ Publish the server using the web-app name returned by the deployment:
 | `POST /api/sessions/{id}/test-runs` | Dashboard token | Assign a test case to a device/build |
 | `POST /api/sessions/{id}/test-runs/{runId}/start` | Device bearer token | Start a capture-linked guided run |
 | `POST /api/sessions/{id}/test-runs/{runId}/complete` | Device bearer token | Save the verdict and automatically diagnose a failure |
+| `POST /api/sessions/{id}/test-runs/{runId}/progress` | Device/runner bearer token | Report bounded automation step progress |
+| `POST /api/sessions/{id}/automation/enrollment` | Dashboard token | Create a one-use runner enrollment valid for ten minutes |
+| `POST /api/automation/exchange` | One-use runner enrollment | Issue a session-scoped automation runner token |
 | `GET /api/sessions/{id}/report.md` | Dashboard token | Export the evidence-backed release report |
 | `GET /health` | Public | Service health probe |
 
@@ -192,6 +197,12 @@ Publish the server using the web-app name returned by the deployment:
 - Downloaded APKs are independently verified by the Android companion.
 
 See [SECURITY.md](SECURITY.md) for reporting and deployment guidance.
+
+## Automatic Android UI runner
+
+The [`automation-runner`](automation-runner/README.md) directory contains the local Node.js runner. It controls a local Android Studio emulator or dedicated USB device through Appium 3 and UiAutomator2. The runner connects outbound to DevBridge over HTTPS; never expose ADB or Appium to a public network.
+
+AI-generated plans are constrained to an allowlist of actions. `forbidden` steps never execute, `controlled` steps require an explicit runner setting, and test credentials remain environment references beginning with `TEST_` rather than model input.
 
 ## Known limitations
 

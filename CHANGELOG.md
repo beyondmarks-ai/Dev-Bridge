@@ -4,6 +4,15 @@ All notable changes are documented in this file. The project follows Semantic Ve
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-04
+
+### Added
+
+- One-use, ten-minute enrollment for local Appium automation runners with scoped in-memory credentials.
+- Structured AI-generated automation plans with bounded actions, timeouts, secret references, and risk classes.
+- Appium 3/UiAutomator2 runner with APK hash verification, semantic-first locators, explicit waits, assertions, and per-step evidence.
+- Live automation step progress, safety blocking, and automatic evidence-grounded diagnosis on failed steps.
+
 ## [0.5.0] - 2026-08-04
 
 ### Added

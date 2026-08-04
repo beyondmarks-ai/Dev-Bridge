@@ -278,10 +278,10 @@ public sealed class SessionPersistenceService : BackgroundService
     }
 
     private sealed record TestCaseSnapshot(Guid Id, string Title, string Instructions, string ExpectedResult,
-        string Priority, bool AiGenerated, DateTimeOffset CreatedAt)
+        string Priority, bool AiGenerated, DateTimeOffset CreatedAt, List<AutomationStep>? AutomationSteps = null)
     {
         public static TestCaseSnapshot From(TestCase value) => new(value.Id, value.Title, value.Instructions,
-            value.ExpectedResult, value.Priority, value.AiGenerated, value.CreatedAt);
+            value.ExpectedResult, value.Priority, value.AiGenerated, value.CreatedAt, [.. value.AutomationSteps]);
         public TestCase ToDomain() => new()
         {
             Id = Id,
@@ -290,17 +290,19 @@ public sealed class SessionPersistenceService : BackgroundService
             ExpectedResult = ExpectedResult,
             Priority = Priority,
             AiGenerated = AiGenerated,
-            CreatedAt = CreatedAt
+            CreatedAt = CreatedAt,
+            AutomationSteps = AutomationSteps ?? []
         };
     }
 
     private sealed record TestRunSnapshot(Guid Id, Guid TestCaseId, Guid DeviceId, Guid? BuildId, string Status,
         string? CaptureId, string? Notes, string? FailureFingerprint, DateTimeOffset CreatedAt,
-        DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt)
+        DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, int CurrentStep = 0, int TotalSteps = 0,
+        string? LastStepMessage = null)
     {
         public static TestRunSnapshot From(TestRun value) => new(value.Id, value.TestCaseId, value.DeviceId,
             value.BuildId, value.Status, value.CaptureId, value.Notes, value.FailureFingerprint, value.CreatedAt,
-            value.StartedAt, value.CompletedAt);
+            value.StartedAt, value.CompletedAt, value.CurrentStep, value.TotalSteps, value.LastStepMessage);
         public TestRun ToDomain() => new()
         {
             Id = Id,
@@ -311,6 +313,9 @@ public sealed class SessionPersistenceService : BackgroundService
             CaptureId = CaptureId,
             Notes = Notes,
             FailureFingerprint = FailureFingerprint,
+            CurrentStep = CurrentStep,
+            TotalSteps = TotalSteps,
+            LastStepMessage = LastStepMessage,
             CreatedAt = CreatedAt,
             StartedAt = StartedAt,
             CompletedAt = CompletedAt

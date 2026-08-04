@@ -212,6 +212,9 @@ app.MapPost("/api/sessions/{sessionId:guid}/test-cases", (Guid sessionId, Create
         return Results.BadRequest(new { error = "Title, instructions, and expected result are required." });
     var priority = Clean(body.Priority, "normal", 12);
     if (priority is not ("critical" or "high" or "normal" or "low")) priority = "normal";
+    var automationSteps = CleanAutomationSteps(body.AutomationSteps);
+    if (body.AutomationSteps is { Count: > 0 } && automationSteps.Count != body.AutomationSteps.Count)
+        return Results.BadRequest(new { error = "One or more automation steps are invalid or exceed the 60-step limit." });
     var testCase = new TestCase
     {
         Id = Guid.NewGuid(),
@@ -219,11 +222,54 @@ app.MapPost("/api/sessions/{sessionId:guid}/test-cases", (Guid sessionId, Create
         Instructions = instructions,
         ExpectedResult = expected,
         Priority = priority,
-        AiGenerated = false
+        AiGenerated = false,
+        AutomationSteps = automationSteps
     };
     session.TestCases[testCase.Id] = testCase;
     store.Touch(session);
     return Results.Ok(testCase);
+});
+
+app.MapPost("/api/sessions/{sessionId:guid}/automation/enrollment", (Guid sessionId, HttpRequest request,
+    SessionStore store, TokenService tokens, NetworkAddressService addresses) =>
+{
+    if (!TryDashboard(sessionId, request, store, tokens, out var session)) return Results.Unauthorized();
+    var rawToken = tokens.CreateToken();
+    var expiresAt = DateTimeOffset.UtcNow.AddMinutes(10);
+    store.AddAutomationTicket(rawToken, new AutomationHandoffTicket(session.Id, expiresAt));
+    return Results.Ok(new
+    {
+        enrollmentToken = rawToken,
+        expiresAt,
+        exchangeUrl = $"{addresses.Resolve(request)}/api/automation/exchange"
+    });
+});
+
+app.MapPost("/api/automation/exchange", (AutomationExchangeRequest body, HttpRequest request,
+    SessionStore store, TokenService tokens, NetworkAddressService addresses) =>
+{
+    if (string.IsNullOrWhiteSpace(body.EnrollmentToken) ||
+        !store.TryConsumeAutomationTicket(body.EnrollmentToken, out var ticket) ||
+        !store.TryGet(ticket.SessionId, out var session)) return Results.Unauthorized();
+    var name = Truncate(body.AgentName?.Trim(), 100);
+    if (string.IsNullOrWhiteSpace(name)) return Results.BadRequest(new { error = "A runner name is required." });
+    if (session.Devices.Values.Count(x => x.Platform == "Automation") >= 20)
+        return Results.Conflict(new { error = "This session already has the maximum number of automation runners." });
+    var rawToken = tokens.CreateToken();
+    var agent = new ConnectedDevice
+    {
+        Id = Guid.NewGuid(),
+        Name = name,
+        TokenHash = tokens.Hash(rawToken),
+        Platform = "Automation",
+        PlatformVersion = Truncate(body.PlatformVersion?.Trim(), 100),
+        Context = CleanContext(body.Capabilities)
+    };
+    session.Devices[agent.Id] = agent;
+    AddEvent(store, session, agent, "info", "automation", "Automation runner enrolled", null);
+    store.Touch(session);
+    return Results.Ok(new AutomationExchangeResponse(addresses.Resolve(request), session.Id, agent.Id, rawToken,
+        session.PackageName, session.ExpiresAt));
 });
 
 app.MapPost("/api/sessions/{sessionId:guid}/test-cases/generate", async (Guid sessionId,
@@ -252,6 +298,9 @@ app.MapPost("/api/sessions/{sessionId:guid}/test-runs", (Guid sessionId, Schedul
     if (!TryDashboard(sessionId, request, store, tokens, out var session)) return Results.Unauthorized();
     if (!session.TestCases.ContainsKey(body.TestCaseId)) return Results.BadRequest(new { error = "Test case not found." });
     if (!session.Devices.ContainsKey(body.DeviceId)) return Results.BadRequest(new { error = "Test device not found." });
+    if (session.Devices[body.DeviceId].Platform == "Automation" &&
+        session.TestCases[body.TestCaseId].AutomationSteps.Count == 0)
+        return Results.BadRequest(new { error = "This test case has no executable automation steps." });
     if (body.BuildId is not null && !session.Builds.ContainsKey(body.BuildId.Value))
         return Results.BadRequest(new { error = "Build not found." });
     var run = new TestRun
@@ -278,6 +327,7 @@ app.MapPost("/api/sessions/{sessionId:guid}/test-runs/{runId:guid}/start", (Guid
     run.CaptureId = captureId;
     run.Status = "running";
     run.StartedAt = DateTimeOffset.UtcNow;
+    if (session.TestCases.TryGetValue(run.TestCaseId, out var testCase)) run.TotalSteps = testCase.AutomationSteps.Count;
     store.Touch(session);
     return Results.Ok(ToTestRun(session, run));
 });
@@ -314,6 +364,34 @@ app.MapPost("/api/sessions/{sessionId:guid}/test-runs/{runId:guid}/complete", as
     }
     store.Touch(session);
     return Results.Ok(new TestRunResult(run, analysis, analysisMessage));
+});
+
+app.MapPost("/api/sessions/{sessionId:guid}/test-runs/{runId:guid}/progress", (Guid sessionId, Guid runId,
+    AutomationProgressRequest body, HttpRequest request, SessionStore store, TokenService tokens) =>
+{
+    if (!AuthenticateDevice(sessionId, request, store, tokens, out var session, out var device)) return Results.Unauthorized();
+    if (!session.TestRuns.TryGetValue(runId, out var run) || run.DeviceId != device.Id) return Results.NotFound();
+    if (run.Status != "running") return Results.Conflict(new { error = "Only a running test accepts progress." });
+    if (body.StepIndex < 0 || body.TotalSteps is < 1 or > 100 || body.StepIndex > body.TotalSteps)
+        return Results.BadRequest(new { error = "Invalid automation step progress." });
+    var status = Clean(body.Status, "running", 20);
+    if (status is not ("running" or "passed" or "failed" or "skipped"))
+        return Results.BadRequest(new { error = "Invalid automation step status." });
+    run.CurrentStep = body.StepIndex;
+    run.TotalSteps = body.TotalSteps;
+    run.LastStepMessage = Truncate(Redact(body.Message), 1_000);
+    var context = new Dictionary<string, string>
+    {
+        ["captureId"] = run.CaptureId ?? string.Empty,
+        ["testRunId"] = run.Id.ToString("D"),
+        ["stepIndex"] = body.StepIndex.ToString(),
+        ["stepStatus"] = status
+    };
+    store.AddEvent(session, BuildEvent(device, status == "failed" ? "error" : "info", "automation",
+        $"step_{status}", run.LastStepMessage ?? $"Automation step {body.StepIndex} {status}.", null, null,
+        body.Fingerprint, null, run.BuildId, null, context, null));
+    store.Touch(session);
+    return Results.Accepted();
 });
 
 app.MapGet("/api/sessions/{sessionId:guid}/report.md", (Guid sessionId, HttpRequest request,
@@ -598,6 +676,9 @@ static object ToTestRun(TestSession session, TestRun run)
         run.CaptureId,
         run.Notes,
         run.FailureFingerprint,
+        run.CurrentStep,
+        run.TotalSteps,
+        run.LastStepMessage,
         run.CreatedAt,
         run.StartedAt,
         run.CompletedAt,
@@ -667,6 +748,30 @@ static string BuildMarkdownReport(TestSession session)
     return text.ToString();
 }
 static string Clean(string? value, string fallback, int max) { var result = string.IsNullOrWhiteSpace(value) ? fallback : value.Trim().ToLowerInvariant(); return result.Length <= max ? result : result[..max]; }
+static IReadOnlyList<AutomationStep> CleanAutomationSteps(IReadOnlyList<AutomationStep>? source)
+{
+    if (source is null or { Count: 0 } || source.Count > 60) return [];
+    var actions = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "resetApp", "launchApp", "tap", "type", "clear", "scroll", "swipe", "back", "waitFor",
+        "assertVisible", "assertText", "assertNotVisible", "assertEnabled", "takeScreenshot", "stop"
+    };
+    var result = new List<AutomationStep>(source.Count);
+    for (var index = 0; index < source.Count; index++)
+    {
+        var item = source[index];
+        if (!actions.Contains(item.Action) || item.TimeoutSeconds is < 1 or > 30 ||
+            item.Risk is not ("safe" or "controlled" or "forbidden")) return [];
+        var secret = item.Secret?.Trim().ToUpperInvariant();
+        if (secret is not null && (!secret.StartsWith("TEST_", StringComparison.Ordinal) ||
+                                   secret.Any(x => !char.IsAsciiLetterUpper(x) && !char.IsAsciiDigit(x) && x != '_')))
+            return [];
+        result.Add(new AutomationStep(index + 1, item.Action, Truncate(item.Target?.Trim(), 200),
+            Truncate(item.Value?.Trim(), 500), Truncate(secret, 100), Truncate(item.Expected?.Trim(), 500),
+            item.TimeoutSeconds, item.Risk));
+    }
+    return result;
+}
 static string? Truncate(string? value, int max) => value is { Length: > 0 } ? value[..Math.Min(value.Length, max)] : value;
 static IReadOnlyDictionary<string, string> CleanContext(IReadOnlyDictionary<string, string>? source) =>
     source?.Take(40).ToDictionary(x => Truncate(x.Key, 60) ?? string.Empty, x => Truncate(Redact(x.Value), 500) ?? string.Empty)

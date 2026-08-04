@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const state = { id: null, token: null, timer: null, dashboard: null };
+const state = { id: null, token: null, timer: null, dashboard: null, runnerCommand: null };
 
 $('session-form').onsubmit = async event => {
   event.preventDefault();
@@ -104,6 +104,30 @@ $('download-report').onclick = async () => {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 
+$('enroll-runner').onclick = async () => {
+  const button = $('enroll-runner');
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/sessions/${state.id}/automation/enrollment`, {
+      method: 'POST', headers: { 'X-Dashboard-Token': state.token }
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'Could not create runner enrollment.');
+    const baseUrl = new URL(data.exchangeUrl).origin;
+    state.runnerCommand = `$env:DEVBRIDGE_URL = '${baseUrl}'\n$env:DEVBRIDGE_ENROLLMENT_TOKEN = '${data.enrollmentToken}'\n$env:ANDROID_DEVICE_NAME = 'emulator-5554'\nnpm start`;
+    $('runner-command').textContent = state.runnerCommand;
+    $('runner-enrollment').classList.remove('hidden');
+    testMessage(`Runner enrollment expires ${new Date(data.expiresAt).toLocaleTimeString()}.`);
+  } catch (error) { testMessage(error.message, true); }
+  finally { button.disabled = false; }
+};
+
+$('copy-runner-command').onclick = async () => {
+  if (!state.runnerCommand) return;
+  await navigator.clipboard.writeText(state.runnerCommand);
+  testMessage('Runner command copied. Treat the one-use token as a secret.');
+};
+
 async function refresh() {
   if (!state.id) return;
   const response = await fetch(`/api/sessions/${state.id}/dashboard`, { headers: { 'X-Dashboard-Token': state.token } });
@@ -137,12 +161,13 @@ function renderTesting(data) {
   const devices = data.devices || [];
   const builds = data.builds || [];
   $('test-cases').innerHTML = data.testCases?.length ? data.testCases.map(item => {
-    const deviceOptions = devices.map(device => `<option value="${esc(device.id)}">${esc(device.name)}</option>`).join('');
+    const deviceOptions = devices.map(device => `<option value="${esc(device.id)}">${esc(device.name)} · ${esc(device.platform)}</option>`).join('');
     const buildOptions = `<option value="">Latest / no build</option>${builds.map(build => `<option value="${esc(build.buildId)}">${esc(build.versionName)} (${build.versionCode})</option>`).join('')}`;
     const controls = devices.length ? `<div class="schedule"><select id="device-${item.id}" aria-label="Test device">${deviceOptions}</select><select id="build-${item.id}" aria-label="Build">${buildOptions}</select><button type="button" onclick="scheduleRun('${esc(item.id)}', this)">Send to device</button></div>` : '<small>Pair a device before scheduling.</small>';
-    return `<article class="test-card"><header><h4>${esc(item.title)}</h4><span class="priority">${esc(item.priority)}${item.aiGenerated ? ' · AI' : ''}</span></header><p>${esc(item.instructions)}</p><small>Expected: ${esc(item.expectedResult)}</small>${controls}</article>`;
+    const automation = item.automationSteps?.length ? ` · ${item.automationSteps.length} automatic steps` : ' · guided only';
+    return `<article class="test-card"><header><h4>${esc(item.title)}</h4><span class="priority">${esc(item.priority)}${item.aiGenerated ? ' · AI' : ''}</span></header><p>${esc(item.instructions)}</p><small>Expected: ${esc(item.expectedResult)}${automation}</small>${controls}</article>`;
   }).join('') : '<div class="empty">No test cases yet.</div>';
-  $('test-runs').innerHTML = data.testRuns?.length ? data.testRuns.map(run => `<article class="test-card"><header><h4>${esc(run.testCase?.title || 'Test case')}</h4><span class="run-status ${esc(run.status)}">${esc(run.status)}</span></header><small>${esc(deviceName(run.deviceId, devices))}${run.testCase?.expectedResult ? ` · Expected: ${esc(run.testCase.expectedResult)}` : ''}</small>${run.notes ? `<p>Tester: ${esc(run.notes)}</p>` : ''}${run.failureFingerprint ? `<button class="secondary" type="button" onclick="focusEvent('${esc(run.failureFingerprint)}')">Open failure evidence</button>` : ''}</article>`).join('') : '<div class="empty">No test runs scheduled.</div>';
+  $('test-runs').innerHTML = data.testRuns?.length ? data.testRuns.map(run => `<article class="test-card"><header><h4>${esc(run.testCase?.title || 'Test case')}</h4><span class="run-status ${esc(run.status)}">${esc(run.status)}</span></header><small>${esc(deviceName(run.deviceId, devices))}${run.testCase?.expectedResult ? ` · Expected: ${esc(run.testCase.expectedResult)}` : ''}</small>${run.totalSteps ? `<span class="automation-progress">Step ${Number(run.currentStep)} of ${Number(run.totalSteps)}${run.lastStepMessage ? ` · ${esc(run.lastStepMessage)}` : ''}</span>` : ''}${run.notes ? `<p>Tester: ${esc(run.notes)}</p>` : ''}${run.failureFingerprint ? `<button class="secondary" type="button" onclick="focusEvent('${esc(run.failureFingerprint)}')">Open failure evidence</button>` : ''}</article>`).join('') : '<div class="empty">No test runs scheduled.</div>';
 }
 
 async function scheduleRun(testCaseId, button) {
