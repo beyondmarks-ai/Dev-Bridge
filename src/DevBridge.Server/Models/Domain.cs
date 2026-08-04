@@ -18,7 +18,56 @@ public sealed class TestSession
     public ConcurrentDictionary<Guid, PublishedBuild> Builds { get; } = new();
     public ConcurrentDictionary<Guid, SdkClient> SdkClients { get; } = new();
     public ConcurrentDictionary<Guid, DiagnosticAttachment> Attachments { get; } = new();
+    public ConcurrentDictionary<string, AiIssueAnalysis> AiAnalyses { get; } = new(StringComparer.Ordinal);
+    public ConcurrentDictionary<Guid, TestCase> TestCases { get; } = new();
+    public ConcurrentDictionary<Guid, TestRun> TestRuns { get; } = new();
     public ConcurrentQueue<DeviceEvent> Events { get; } = new();
+}
+
+public sealed class TestCase
+{
+    public required Guid Id { get; init; }
+    public required string Title { get; init; }
+    public required string Instructions { get; init; }
+    public required string ExpectedResult { get; init; }
+    public required string Priority { get; init; }
+    public bool AiGenerated { get; init; }
+    public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class TestRun
+{
+    public required Guid Id { get; init; }
+    public required Guid TestCaseId { get; init; }
+    public required Guid DeviceId { get; init; }
+    public Guid? BuildId { get; init; }
+    public required string Status { get; set; }
+    public string? CaptureId { get; set; }
+    public string? Notes { get; set; }
+    public string? FailureFingerprint { get; set; }
+    public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? StartedAt { get; set; }
+    public DateTimeOffset? CompletedAt { get; set; }
+}
+
+public sealed class AiIssueAnalysis
+{
+    public required Guid Id { get; init; }
+    public required string Fingerprint { get; init; }
+    public required string Summary { get; init; }
+    public required string UserImpact { get; init; }
+    public required string ProbableCause { get; init; }
+    public required string ProblemLocation { get; init; }
+    public required string SuggestedFix { get; init; }
+    public required int Confidence { get; init; }
+    public IReadOnlyList<string> Evidence { get; init; } = [];
+    public IReadOnlyList<string> ReproductionSteps { get; init; } = [];
+    public IReadOnlyList<string> Limitations { get; init; } = [];
+    public required string Model { get; init; }
+    public string? ProviderResponseId { get; init; }
+    public int? InputTokens { get; init; }
+    public int? OutputTokens { get; init; }
+    public DateTimeOffset AnalyzedAt { get; init; } = DateTimeOffset.UtcNow;
 }
 
 public sealed class SdkClient
@@ -41,6 +90,9 @@ public sealed class DiagnosticAttachment
     public required string BlobName { get; init; }
     public required string ContentType { get; init; }
     public required long SizeBytes { get; init; }
+    public string? RelatedFingerprint { get; init; }
+    public string? CaptureId { get; init; }
+    public DateTimeOffset? CapturedAt { get; init; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
 }
 

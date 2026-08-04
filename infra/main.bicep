@@ -10,6 +10,18 @@ param location string = resourceGroup().location
 @description('Secret required by the PC dashboard to create test sessions.')
 param developerAccessKey string
 
+@description('Resource group containing the existing Microsoft Foundry/Azure AI account.')
+param aiFoundryResourceGroupName string
+
+@description('Existing Microsoft Foundry/Azure AI account name.')
+param aiFoundryAccountName string
+
+@description('Inference endpoint for the existing Microsoft Foundry/Azure AI account.')
+param aiFoundryEndpoint string
+
+@description('Deployed model name used for issue analysis.')
+param aiModelDeployment string
+
 var suffix = uniqueString(subscription().id, resourceGroup().id)
 var storageName = take(toLower('${resourcePrefix}${suffix}'), 24)
 var appName = toLower('${resourcePrefix}-${suffix}')
@@ -91,8 +103,12 @@ resource app 'Microsoft.Web/sites@2025-03-01' = {
         { name: 'DevBridge__DiagnosticTableName', value: 'DevBridgeDiagnostics' }
         { name: 'DevBridge__StorageContainerName', value: 'devbridge-artifacts' }
         { name: 'DevBridge__MaximumAttachmentMegabytes', value: '100' }
+        { name: 'DevBridge__AiEndpoint', value: aiFoundryEndpoint }
+        { name: 'DevBridge__AiModelDeployment', value: aiModelDeployment }
+        { name: 'DevBridge__AiMaximumEvidenceEvents', value: '40' }
         { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: insights.properties.ConnectionString }
         { name: 'WEBSITE_RUN_FROM_PACKAGE', value: '1' }
+        { name: 'WEBSITES_CONTAINER_START_TIME_LIMIT', value: '300' }
       ]
     }
   }
@@ -118,7 +134,17 @@ resource blobContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = 
   }
 }
 
+module aiInferenceRole 'ai-role.bicep' = {
+  name: 'ai-inference-role'
+  scope: resourceGroup(aiFoundryResourceGroupName)
+  params: {
+    aiFoundryAccountName: aiFoundryAccountName
+    principalId: app.identity.principalId
+  }
+}
+
 output webAppName string = app.name
 output publicUrl string = 'https://${app.properties.defaultHostName}'
 output storageAccountName string = storage.name
 output applicationInsightsName string = insights.name
+output aiModelDeployment string = aiModelDeployment

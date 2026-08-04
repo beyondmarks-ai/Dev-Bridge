@@ -13,4 +13,7 @@ public sealed class DevBridgeOptions
     public string DiagnosticTableName { get; set; } = "DevBridgeDiagnostics";
     public string StorageContainerName { get; set; } = "devbridge-artifacts";
     public int MaximumAttachmentMegabytes { get; set; } = 100;
+    public string AiEndpoint { get; set; } = string.Empty;
+    public string AiModelDeployment { get; set; } = string.Empty;
+    public int AiMaximumEvidenceEvents { get; set; } = 40;
 }

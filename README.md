@@ -19,6 +19,11 @@ DevBridge removes ad-hoc APK sharing through messaging apps, removable drives, a
 - Connected-device, build, event, and tester-feedback views.
 - Structured crash, ANR, performance, launch, and installation event batches.
 - Automatic issue fingerprinting, occurrence counts, and affected-device grouping.
+- Evidence-grounded Azure AI issue diagnoses with plain-English impact, probable cause, location, solution, confidence, and limitations.
+- Correlated pre-failure action/network breadcrumbs, automatic failure screenshots, and recording keyframes for multimodal diagnosis.
+- Azure AI-generated guided test cases that can be assigned to a paired device and build.
+- Evidence-linked pass, fail, and blocked test runs with automatic failure diagnosis in the companion.
+- Consolidated release verdict, pass rate, diagnosed-failure count, and Markdown report export.
 - Secret redaction and managed-identity archival to Azure Table Storage.
 - Application Insights and Log Analytics infrastructure for service monitoring.
 - One-use, two-minute SDK enrollment handoffs with separate build-scoped telemetry tokens.
@@ -104,6 +109,9 @@ Configuration uses the `DevBridge` section and standard ASP.NET Core environment
 | `SessionLifetimeHours` | `DevBridge__SessionLifetimeHours` | `8` | Session and artifact retention |
 | `MaximumApkMegabytes` | `DevBridge__MaximumApkMegabytes` | `500` | Request and form upload limit |
 | `ArtifactPath` | `DevBridge__ArtifactPath` | `Data/Artifacts` | APK storage location |
+| `AiEndpoint` | `DevBridge__AiEndpoint` | Empty | Microsoft Foundry/Azure AI inference endpoint |
+| `AiModelDeployment` | `DevBridge__AiModelDeployment` | Empty | Model deployment used for structured issue analysis |
+| `AiMaximumEvidenceEvents` | `DevBridge__AiMaximumEvidenceEvents` | `40` | Maximum matching events supplied to one diagnosis |
 
 Never commit access keys, connection strings, signing keys, refresh tokens, or Azure credentials.
 
@@ -124,6 +132,10 @@ $accessKey = Read-Host "Developer access key" -AsSecureString
   -ResourceGroup "devbridge-rg" `
   -Location "centralindia" `
   -ResourcePrefix "devbridge" `
+  -AiFoundryResourceGroupName "YOUR_AI_RESOURCE_GROUP" `
+  -AiFoundryAccountName "YOUR_AI_ACCOUNT" `
+  -AiFoundryEndpoint "https://YOUR_AI_ACCOUNT.cognitiveservices.azure.com" `
+  -AiModelDeployment "YOUR_MODEL_DEPLOYMENT" `
   -DeveloperAccessKey $accessKey
 ```
 
@@ -155,12 +167,23 @@ Publish the server using the web-app name returned by the deployment:
 | `POST /api/sessions/{id}/attachments` | Device or SDK token | Upload diagnostic evidence |
 | `GET /api/sessions/{id}/attachments/{attachmentId}` | Dashboard token | View protected evidence |
 | `POST /api/sessions/{id}/feedback` | Device bearer token | Submit tester feedback |
+| `POST /api/sessions/{id}/issues/{fingerprint}/analysis` | Dashboard token | Generate or refresh an evidence-grounded AI diagnosis |
+| `POST /api/sessions/{id}/test-cases` | Dashboard token | Add a manual guided test case |
+| `POST /api/sessions/{id}/test-cases/generate` | Dashboard token | Generate a bounded test plan with Azure AI |
+| `POST /api/sessions/{id}/test-runs` | Dashboard token | Assign a test case to a device/build |
+| `POST /api/sessions/{id}/test-runs/{runId}/start` | Device bearer token | Start a capture-linked guided run |
+| `POST /api/sessions/{id}/test-runs/{runId}/complete` | Device bearer token | Save the verdict and automatically diagnose a failure |
+| `GET /api/sessions/{id}/report.md` | Dashboard token | Export the evidence-backed release report |
 | `GET /health` | Public | Service health probe |
 
 ## Security model
 
 - Pairing, dashboard, device, and download credentials have separate scopes.
 - Raw pairing and device credentials are not retained; SHA-256 hashes are stored in memory.
+- Azure AI uses the web app's managed identity and the least-privilege inference role; no model API key is stored.
+- Diagnostic evidence is treated as untrusted model input, and diagnoses must disclose missing evidence instead of inventing source locations.
+- Visual evidence is sent to the configured model only when it is correlated to the issue by fingerprint, capture ID, device/build, or a bounded time window.
+- Network breadcrumbs exclude query strings, headers, and bodies; target applications must avoid placing personal data in URL paths.
 - Pairing tokens are one-use and expire after five minutes by default.
 - Download tickets are one-use and expire after two minutes.
 - Public Blob access is disabled by the infrastructure template.

@@ -130,7 +130,9 @@ public sealed class SessionPersistenceService : BackgroundService
         Guid Id, string ProjectName, string AppName, string? PackageName, string DashboardTokenHash,
         string PairingTokenHash, DateTimeOffset PairingExpiresAt, DateTimeOffset ExpiresAt,
         DateTimeOffset CreatedAt, bool PairingConsumed, List<DeviceSnapshot> Devices,
-        List<BuildSnapshot> Builds, List<SdkClientSnapshot> SdkClients, List<AttachmentSnapshot> Attachments)
+        List<BuildSnapshot> Builds, List<SdkClientSnapshot> SdkClients, List<AttachmentSnapshot> Attachments,
+        List<AiAnalysisSnapshot>? AiAnalyses, List<TestCaseSnapshot>? TestCases = null,
+        List<TestRunSnapshot>? TestRuns = null)
     {
         public static SessionSnapshot From(TestSession session) => new(
             session.Id, session.ProjectName, session.AppName, session.PackageName, session.DashboardTokenHash,
@@ -138,7 +140,10 @@ public sealed class SessionPersistenceService : BackgroundService
             session.PairingConsumed, session.Devices.Values.Select(DeviceSnapshot.From).ToList(),
             session.Builds.Values.Select(BuildSnapshot.From).ToList(),
             session.SdkClients.Values.Select(SdkClientSnapshot.From).ToList(),
-            session.Attachments.Values.Select(AttachmentSnapshot.From).ToList());
+            session.Attachments.Values.Select(AttachmentSnapshot.From).ToList(),
+            session.AiAnalyses.Values.Select(AiAnalysisSnapshot.From).ToList(),
+            session.TestCases.Values.Select(TestCaseSnapshot.From).ToList(),
+            session.TestRuns.Values.Select(TestRunSnapshot.From).ToList());
 
         public TestSession ToDomain()
         {
@@ -159,6 +164,9 @@ public sealed class SessionPersistenceService : BackgroundService
             foreach (var item in Builds) session.Builds[item.Id] = item.ToDomain();
             foreach (var item in SdkClients) session.SdkClients[item.Id] = item.ToDomain();
             foreach (var item in Attachments) session.Attachments[item.Id] = item.ToDomain();
+            foreach (var item in AiAnalyses ?? []) session.AiAnalyses[item.Fingerprint] = item.ToDomain();
+            foreach (var item in TestCases ?? []) session.TestCases[item.Id] = item.ToDomain();
+            foreach (var item in TestRuns ?? []) session.TestRuns[item.Id] = item.ToDomain();
             return session;
         }
     }
@@ -216,10 +224,12 @@ public sealed class SessionPersistenceService : BackgroundService
     }
 
     private sealed record AttachmentSnapshot(Guid Id, Guid DeviceId, Guid? BuildId, string Kind, string FileName,
-        string BlobName, string ContentType, long SizeBytes, DateTimeOffset CreatedAt)
+        string BlobName, string ContentType, long SizeBytes, DateTimeOffset CreatedAt,
+        string? RelatedFingerprint = null, string? CaptureId = null, DateTimeOffset? CapturedAt = null)
     {
         public static AttachmentSnapshot From(DiagnosticAttachment value) => new(value.Id, value.DeviceId, value.BuildId,
-            value.Kind, value.FileName, value.BlobName, value.ContentType, value.SizeBytes, value.CreatedAt);
+            value.Kind, value.FileName, value.BlobName, value.ContentType, value.SizeBytes, value.CreatedAt,
+            value.RelatedFingerprint, value.CaptureId, value.CapturedAt);
         public DiagnosticAttachment ToDomain() => new()
         {
             Id = Id,
@@ -230,7 +240,80 @@ public sealed class SessionPersistenceService : BackgroundService
             BlobName = BlobName,
             ContentType = ContentType,
             SizeBytes = SizeBytes,
+            RelatedFingerprint = RelatedFingerprint,
+            CaptureId = CaptureId,
+            CapturedAt = CapturedAt,
             CreatedAt = CreatedAt
+        };
+    }
+
+    private sealed record AiAnalysisSnapshot(Guid Id, string Fingerprint, string Summary, string UserImpact,
+        string ProbableCause, string ProblemLocation, string SuggestedFix, int Confidence, List<string> Evidence,
+        List<string> ReproductionSteps, List<string> Limitations, string Model, string? ProviderResponseId,
+        int? InputTokens, int? OutputTokens, DateTimeOffset AnalyzedAt)
+    {
+        public static AiAnalysisSnapshot From(AiIssueAnalysis value) => new(value.Id, value.Fingerprint,
+            value.Summary, value.UserImpact, value.ProbableCause, value.ProblemLocation, value.SuggestedFix,
+            value.Confidence, [.. value.Evidence], [.. value.ReproductionSteps], [.. value.Limitations],
+            value.Model, value.ProviderResponseId, value.InputTokens, value.OutputTokens, value.AnalyzedAt);
+        public AiIssueAnalysis ToDomain() => new()
+        {
+            Id = Id,
+            Fingerprint = Fingerprint,
+            Summary = Summary,
+            UserImpact = UserImpact,
+            ProbableCause = ProbableCause,
+            ProblemLocation = ProblemLocation,
+            SuggestedFix = SuggestedFix,
+            Confidence = Confidence,
+            Evidence = Evidence,
+            ReproductionSteps = ReproductionSteps,
+            Limitations = Limitations,
+            Model = Model,
+            ProviderResponseId = ProviderResponseId,
+            InputTokens = InputTokens,
+            OutputTokens = OutputTokens,
+            AnalyzedAt = AnalyzedAt
+        };
+    }
+
+    private sealed record TestCaseSnapshot(Guid Id, string Title, string Instructions, string ExpectedResult,
+        string Priority, bool AiGenerated, DateTimeOffset CreatedAt)
+    {
+        public static TestCaseSnapshot From(TestCase value) => new(value.Id, value.Title, value.Instructions,
+            value.ExpectedResult, value.Priority, value.AiGenerated, value.CreatedAt);
+        public TestCase ToDomain() => new()
+        {
+            Id = Id,
+            Title = Title,
+            Instructions = Instructions,
+            ExpectedResult = ExpectedResult,
+            Priority = Priority,
+            AiGenerated = AiGenerated,
+            CreatedAt = CreatedAt
+        };
+    }
+
+    private sealed record TestRunSnapshot(Guid Id, Guid TestCaseId, Guid DeviceId, Guid? BuildId, string Status,
+        string? CaptureId, string? Notes, string? FailureFingerprint, DateTimeOffset CreatedAt,
+        DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt)
+    {
+        public static TestRunSnapshot From(TestRun value) => new(value.Id, value.TestCaseId, value.DeviceId,
+            value.BuildId, value.Status, value.CaptureId, value.Notes, value.FailureFingerprint, value.CreatedAt,
+            value.StartedAt, value.CompletedAt);
+        public TestRun ToDomain() => new()
+        {
+            Id = Id,
+            TestCaseId = TestCaseId,
+            DeviceId = DeviceId,
+            BuildId = BuildId,
+            Status = Status,
+            CaptureId = CaptureId,
+            Notes = Notes,
+            FailureFingerprint = FailureFingerprint,
+            CreatedAt = CreatedAt,
+            StartedAt = StartedAt,
+            CompletedAt = CompletedAt
         };
     }
 }

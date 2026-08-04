@@ -4,6 +4,23 @@ All notable changes are documented in this file. The project follows Semantic Ve
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-04
+
+### Added
+
+- Azure AI-generated guided mobile test cases with observable expected results.
+- Device/build test assignment and ready, running, passed, failed, or blocked run states.
+- Automatic evidence-grounded diagnosis when a guided run fails.
+- Session quality gate, pass rate, and authenticated Markdown release report export.
+
+## [0.4.0] - 2026-08-04
+
+### Added
+
+- Managed-identity Microsoft Foundry issue analysis with strict structured output.
+- Correlated action/network breadcrumbs, capture IDs, automatic screenshots, and visual recording frames.
+- Multimodal issue analysis using protected screenshots plus a bounded structured event timeline.
+
 ### Planned
 
 - Real-time Web PubSub transport.

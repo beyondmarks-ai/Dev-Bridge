@@ -3,6 +3,14 @@ param(
     [string] $Location = 'centralindia',
     [string] $ResourcePrefix = 'devbridge',
     [Parameter(Mandatory = $true)]
+    [string] $AiFoundryResourceGroupName,
+    [Parameter(Mandatory = $true)]
+    [string] $AiFoundryAccountName,
+    [Parameter(Mandatory = $true)]
+    [string] $AiFoundryEndpoint,
+    [Parameter(Mandatory = $true)]
+    [string] $AiModelDeployment,
+    [Parameter(Mandatory = $true)]
     [SecureString] $DeveloperAccessKey
 )
 
@@ -15,6 +23,8 @@ $deployment = az deployment group create `
     --resource-group $ResourceGroup `
     --template-file $template `
     --parameters resourcePrefix=$ResourcePrefix developerAccessKey=$plainAccessKey `
+        aiFoundryResourceGroupName=$AiFoundryResourceGroupName aiFoundryAccountName=$AiFoundryAccountName `
+        aiFoundryEndpoint=$AiFoundryEndpoint aiModelDeployment=$AiModelDeployment `
     --query properties.outputs `
     --output json | ConvertFrom-Json
 

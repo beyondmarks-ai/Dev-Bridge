@@ -57,6 +57,21 @@
         <div><span>Install failures</span><strong id="install-failure-count">0</strong></div>
       </article>
 
+      <article class="card test-workspace">
+        <div class="title"><div><span class="eyebrow">GUIDED AI TESTING</span><h2>Test plan & release verdict</h2></div><div class="report-actions"><span id="quality-verdict" class="pill">Incomplete</span><button id="download-report" class="secondary" type="button">Export report</button></div></div>
+        <div id="quality-summary" class="quality-summary">Generate test cases, schedule them to a paired device, and collect evidence-backed results.</div>
+        <form id="generate-tests-form" class="test-generator">
+          <label>Feature or user journey<textarea id="test-feature" rows="3" maxlength="2000" placeholder="Example: User signs in, adds a product to cart, and completes payment" required></textarea></label>
+          <label>Cases<select id="test-count"><option>4</option><option selected>6</option><option>8</option><option>10</option></select></label>
+          <button id="generate-tests-button">Generate with Azure AI</button>
+        </form>
+        <div id="test-message" class="message hidden"></div>
+        <div class="test-columns">
+          <section><h3>Test cases</h3><div id="test-cases" class="test-list"><div class="empty">No test cases yet.</div></div></section>
+          <section><h3>Runs</h3><div id="test-runs" class="test-list"><div class="empty">No test runs scheduled.</div></div></section>
+        </div>
+      </article>
+
       <article class="card">
         <div class="title"><div><span class="eyebrow">ACTIONABLE</span><h2>Issues</h2></div><span id="session-expiry" class="muted"></span></div>
         <div id="issues" class="issue-list"><div class="empty">No diagnostic issues reported.</div></div>

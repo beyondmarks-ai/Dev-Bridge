@@ -19,3 +19,9 @@ public sealed record SdkHandoffResponse(string HandoffToken, DateTimeOffset Expi
 public sealed record SdkExchangeRequest(string HandoffToken);
 public sealed record SdkExchangeResponse(string BaseUrl, Guid SessionId, Guid DeviceId, Guid BuildId, string SdkToken, DateTimeOffset SessionExpiresAt);
 public sealed record AttachmentResponse(Guid AttachmentId, string Kind, string FileName, string ContentType, long SizeBytes, DateTimeOffset CreatedAt);
+public sealed record CreateTestCaseRequest(string Title, string Instructions, string ExpectedResult, string? Priority);
+public sealed record GenerateTestCasesRequest(string Feature, int? Count);
+public sealed record ScheduleTestRunRequest(Guid TestCaseId, Guid DeviceId, Guid? BuildId);
+public sealed record StartTestRunRequest(string CaptureId);
+public sealed record CompleteTestRunRequest(string Verdict, string? Notes, string? CaptureId);
+public sealed record TestRunResult(TestRun Run, AiIssueAnalysis? Analysis, string? AnalysisMessage = null);

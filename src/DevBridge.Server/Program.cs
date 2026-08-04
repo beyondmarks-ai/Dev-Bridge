@@ -24,33 +24,36 @@ builder.Services.AddHostedService(provider => provider.GetRequiredService<Sessio
 builder.Services.AddSingleton<SessionStore>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<SessionStore>());
 builder.Services.AddSingleton<NetworkAddressService>();
+builder.Services.AddHttpClient<AiIssueAnalysisService>(client => client.Timeout = TimeSpan.FromSeconds(90));
 builder.Services.AddHostedService<SessionCleanupService>();
 
 var app = builder.Build();
 app.UseDefaultFiles();
 app.UseStaticFiles();
-app.MapGet("/health", (DiagnosticArchiveService archive, SessionPersistenceService persistence) => Results.Ok(new
-{
-    status = "healthy",
-    utc = DateTimeOffset.UtcNow,
-    diagnosticsArchive = new
+app.MapGet("/health", (DiagnosticArchiveService archive, SessionPersistenceService persistence,
+    AiIssueAnalysisService ai) => Results.Ok(new
     {
-        archive.Enabled,
-        archive.Initialized,
-        archive.ArchivedCount,
-        archive.FailedCount,
-        archive.LastFailureAt
-    },
-    sessionPersistence = new
-    {
-        persistence.Enabled,
-        persistence.Initialized,
-        persistence.SavedCount,
-        persistence.FailedCount,
-        persistence.RestoredCount,
-        persistence.LoadFailureCount
-    }
-}));
+        status = "healthy",
+        utc = DateTimeOffset.UtcNow,
+        diagnosticsArchive = new
+        {
+            archive.Enabled,
+            archive.Initialized,
+            archive.ArchivedCount,
+            archive.FailedCount,
+            archive.LastFailureAt
+        },
+        sessionPersistence = new
+        {
+            persistence.Enabled,
+            persistence.Initialized,
+            persistence.SavedCount,
+            persistence.FailedCount,
+            persistence.RestoredCount,
+            persistence.LoadFailureCount
+        },
+        aiAnalysis = new { ai.Enabled }
+    }));
 
 app.MapPost("/api/sessions", (CreateSessionRequest body, HttpRequest request, SessionStore store,
     TokenService tokens, NetworkAddressService addresses, IOptions<DevBridgeOptions> options) =>
@@ -140,7 +143,8 @@ app.MapGet("/api/sessions/{sessionId:guid}/dashboard", (Guid sessionId, HttpRequ
             affectedDevices = group.Select(x => x.DeviceId).Distinct().Count(),
             firstSeenAt = group.Min(x => x.OccurredAt),
             lastSeenAt = group.Max(x => x.OccurredAt),
-            latest = group.OrderByDescending(x => x.OccurredAt).First()
+            latest = group.OrderByDescending(x => x.OccurredAt).First(),
+            analysis = session.AiAnalyses.GetValueOrDefault(group.Key)
         })
         .OrderByDescending(x => x.lastSeenAt)
         .Take(100);
@@ -156,6 +160,9 @@ app.MapGet("/api/sessions/{sessionId:guid}/dashboard", (Guid sessionId, HttpRequ
         session.PairingConsumed,
         devices = session.Devices.Values.OrderByDescending(x => x.LastSeenAt).Select(x => new { x.Id, x.Name, x.Platform, x.PlatformVersion, x.Context, x.PairedAt, x.LastSeenAt }),
         builds = session.Builds.Values.OrderByDescending(x => x.UploadedAt).Select(ToBuild),
+        testCases = session.TestCases.Values.OrderByDescending(x => x.CreatedAt),
+        testRuns = session.TestRuns.Values.OrderByDescending(x => x.CreatedAt).Select(run => ToTestRun(session, run)),
+        quality = QualityReport(session),
         events = events.Reverse().Take(300),
         issues,
         summary = new
@@ -168,11 +175,161 @@ app.MapGet("/api/sessions/{sessionId:guid}/dashboard", (Guid sessionId, HttpRequ
     });
 });
 
+app.MapPost("/api/sessions/{sessionId:guid}/issues/{fingerprint}/analysis", async (Guid sessionId,
+    string fingerprint, bool? refresh, HttpRequest request, SessionStore store, TokenService tokens,
+    AiIssueAnalysisService ai, CancellationToken cancellationToken) =>
+{
+    if (!store.TryGet(sessionId, out var session)) return Results.NotFound();
+    if (!tokens.Verify(request.Headers["X-Dashboard-Token"].FirstOrDefault(), session.DashboardTokenHash))
+        return Results.Unauthorized();
+    if (string.IsNullOrWhiteSpace(fingerprint) || fingerprint.Length > 160)
+        return Results.BadRequest(new { error = "A valid issue fingerprint is required." });
+    try
+    {
+        var analysis = await ai.AnalyzeAsync(session, fingerprint, refresh ?? false, cancellationToken);
+        store.Touch(session);
+        return Results.Ok(analysis);
+    }
+    catch (KeyNotFoundException)
+    {
+        return Results.NotFound(new { error = "Issue evidence was not found." });
+    }
+    catch (AiAnalysisUnavailableException exception)
+    {
+        return Results.Problem(exception.Message, statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "AI analysis unavailable");
+    }
+});
+
+app.MapPost("/api/sessions/{sessionId:guid}/test-cases", (Guid sessionId, CreateTestCaseRequest body,
+    HttpRequest request, SessionStore store, TokenService tokens) =>
+{
+    if (!TryDashboard(sessionId, request, store, tokens, out var session)) return Results.Unauthorized();
+    var title = Truncate(body.Title?.Trim(), 120);
+    var instructions = Truncate(body.Instructions?.Trim(), 2_000);
+    var expected = Truncate(body.ExpectedResult?.Trim(), 1_000);
+    if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(instructions) || string.IsNullOrWhiteSpace(expected))
+        return Results.BadRequest(new { error = "Title, instructions, and expected result are required." });
+    var priority = Clean(body.Priority, "normal", 12);
+    if (priority is not ("critical" or "high" or "normal" or "low")) priority = "normal";
+    var testCase = new TestCase
+    {
+        Id = Guid.NewGuid(),
+        Title = title,
+        Instructions = instructions,
+        ExpectedResult = expected,
+        Priority = priority,
+        AiGenerated = false
+    };
+    session.TestCases[testCase.Id] = testCase;
+    store.Touch(session);
+    return Results.Ok(testCase);
+});
+
+app.MapPost("/api/sessions/{sessionId:guid}/test-cases/generate", async (Guid sessionId,
+    GenerateTestCasesRequest body, HttpRequest request, SessionStore store, TokenService tokens,
+    AiIssueAnalysisService ai, CancellationToken cancellationToken) =>
+{
+    if (!TryDashboard(sessionId, request, store, tokens, out var session)) return Results.Unauthorized();
+    var feature = Truncate(body.Feature?.Trim(), 2_000);
+    if (string.IsNullOrWhiteSpace(feature)) return Results.BadRequest(new { error = "Describe the feature to test." });
+    try
+    {
+        var cases = await ai.GenerateTestCasesAsync(session, feature, body.Count ?? 6, cancellationToken);
+        store.Touch(session);
+        return Results.Ok(new { testCases = cases });
+    }
+    catch (AiAnalysisUnavailableException exception)
+    {
+        return Results.Problem(exception.Message, statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "AI test generation unavailable");
+    }
+});
+
+app.MapPost("/api/sessions/{sessionId:guid}/test-runs", (Guid sessionId, ScheduleTestRunRequest body,
+    HttpRequest request, SessionStore store, TokenService tokens) =>
+{
+    if (!TryDashboard(sessionId, request, store, tokens, out var session)) return Results.Unauthorized();
+    if (!session.TestCases.ContainsKey(body.TestCaseId)) return Results.BadRequest(new { error = "Test case not found." });
+    if (!session.Devices.ContainsKey(body.DeviceId)) return Results.BadRequest(new { error = "Test device not found." });
+    if (body.BuildId is not null && !session.Builds.ContainsKey(body.BuildId.Value))
+        return Results.BadRequest(new { error = "Build not found." });
+    var run = new TestRun
+    {
+        Id = Guid.NewGuid(),
+        TestCaseId = body.TestCaseId,
+        DeviceId = body.DeviceId,
+        BuildId = body.BuildId,
+        Status = "ready"
+    };
+    session.TestRuns[run.Id] = run;
+    store.Touch(session);
+    return Results.Ok(ToTestRun(session, run));
+});
+
+app.MapPost("/api/sessions/{sessionId:guid}/test-runs/{runId:guid}/start", (Guid sessionId, Guid runId,
+    StartTestRunRequest body, HttpRequest request, SessionStore store, TokenService tokens) =>
+{
+    if (!AuthenticateDevice(sessionId, request, store, tokens, out var session, out var device)) return Results.Unauthorized();
+    if (!session.TestRuns.TryGetValue(runId, out var run) || run.DeviceId != device.Id) return Results.NotFound();
+    if (run.Status != "ready") return Results.Conflict(new { error = "Only a ready test can be started." });
+    var captureId = Truncate(body.CaptureId?.Trim(), 100);
+    if (string.IsNullOrWhiteSpace(captureId)) return Results.BadRequest(new { error = "A capture ID is required." });
+    run.CaptureId = captureId;
+    run.Status = "running";
+    run.StartedAt = DateTimeOffset.UtcNow;
+    store.Touch(session);
+    return Results.Ok(ToTestRun(session, run));
+});
+
+app.MapPost("/api/sessions/{sessionId:guid}/test-runs/{runId:guid}/complete", async (Guid sessionId, Guid runId,
+    CompleteTestRunRequest body, HttpRequest request, SessionStore store, TokenService tokens,
+    AiIssueAnalysisService ai, CancellationToken cancellationToken) =>
+{
+    if (!AuthenticateDevice(sessionId, request, store, tokens, out var session, out var device)) return Results.Unauthorized();
+    if (!session.TestRuns.TryGetValue(runId, out var run) || run.DeviceId != device.Id) return Results.NotFound();
+    if (run.Status != "running") return Results.Conflict(new { error = "Only a running test can be completed." });
+    var verdict = body.Verdict?.Trim().ToLowerInvariant();
+    if (verdict is not ("passed" or "failed" or "blocked"))
+        return Results.BadRequest(new { error = "Verdict must be passed, failed, or blocked." });
+    run.Status = verdict;
+    run.Notes = Truncate(body.Notes?.Trim(), 2_000);
+    run.CaptureId ??= Truncate(body.CaptureId?.Trim(), 100);
+    run.CompletedAt = DateTimeOffset.UtcNow;
+    AiIssueAnalysis? analysis = null;
+    string? analysisMessage = null;
+    if (verdict == "failed" && !string.IsNullOrWhiteSpace(run.CaptureId))
+    {
+        var issue = session.Events.Where(x => x.DeviceId == device.Id && x.Category != "attachment" &&
+                                               x.Context.GetValueOrDefault("captureId") == run.CaptureId &&
+                                               (x.Level is "error" or "fatal" || x.Category is "crash" or "anr" or "performance"))
+            .OrderByDescending(x => x.OccurredAt).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x.Fingerprint));
+        if (issue is not null)
+        {
+            run.FailureFingerprint = issue.Fingerprint;
+            try { analysis = await ai.AnalyzeAsync(session, issue.Fingerprint!, false, cancellationToken); }
+            catch (AiAnalysisUnavailableException exception) { analysisMessage = exception.Message; }
+        }
+        else analysisMessage = "No instrumented failure was found for this capture. The recording remains available for manual review.";
+    }
+    store.Touch(session);
+    return Results.Ok(new TestRunResult(run, analysis, analysisMessage));
+});
+
+app.MapGet("/api/sessions/{sessionId:guid}/report.md", (Guid sessionId, HttpRequest request,
+    SessionStore store, TokenService tokens) =>
+{
+    if (!TryDashboard(sessionId, request, store, tokens, out var session)) return Results.Unauthorized();
+    var markdown = BuildMarkdownReport(session);
+    return Results.File(Encoding.UTF8.GetBytes(markdown), "text/markdown; charset=utf-8",
+        $"devbridge-{session.Id:N}-report.md");
+});
+
 app.MapGet("/api/sessions/{sessionId:guid}/device", (Guid sessionId, HttpRequest request, SessionStore store, TokenService tokens) =>
 {
     if (!AuthenticateDevice(sessionId, request, store, tokens, out var session, out var device)) return Results.Unauthorized();
     device.LastSeenAt = DateTimeOffset.UtcNow;
-    return Results.Ok(new { session.Id, session.ProjectName, session.AppName, session.PackageName, session.ExpiresAt, device = new { device.Id, device.Name }, builds = session.Builds.Values.OrderByDescending(x => x.UploadedAt).Select(ToBuild) });
+    return Results.Ok(new { session.Id, session.ProjectName, session.AppName, session.PackageName, session.ExpiresAt, device = new { device.Id, device.Name }, builds = session.Builds.Values.OrderByDescending(x => x.UploadedAt).Select(ToBuild), testRuns = session.TestRuns.Values.Where(x => x.DeviceId == device.Id && x.Status is "ready" or "running").OrderBy(x => x.CreatedAt).Select(run => ToTestRun(session, run)) });
 });
 
 app.MapPost("/api/sessions/{sessionId:guid}/events", (Guid sessionId, DeviceEventRequest body, HttpRequest request, SessionStore store, TokenService tokens) =>
@@ -340,6 +497,10 @@ app.MapPost("/api/sessions/{sessionId:guid}/attachments", async (Guid sessionId,
         return Results.BadRequest(new { error = "Only PNG, JPEG, MP4, WebM, and text attachments are supported." });
     Guid? buildId = Guid.TryParse(form["buildId"], out var parsedBuild) ? parsedBuild : null;
     if (buildId is not null && !session.Builds.ContainsKey(buildId.Value)) return Results.BadRequest(new { error = "Build not found." });
+    var relatedFingerprint = Truncate(form["fingerprint"].ToString().Trim(), 160);
+    var captureId = Truncate(form["captureId"].ToString().Trim(), 100);
+    DateTimeOffset? capturedAt = DateTimeOffset.TryParse(form["capturedAt"], out var parsedCapturedAt)
+        ? parsedCapturedAt : null;
     var id = Guid.NewGuid();
     var kind = Clean(form["kind"], extension is ".mp4" or ".webm" ? "recording" : "screenshot", 30);
     var blobName = $"attachments/{session.Id:N}/{id:N}{extension}";
@@ -354,14 +515,22 @@ app.MapPost("/api/sessions/{sessionId:guid}/attachments", async (Guid sessionId,
         FileName = Path.GetFileName(file.FileName),
         BlobName = blobName,
         ContentType = contentType,
-        SizeBytes = file.Length
+        SizeBytes = file.Length,
+        RelatedFingerprint = string.IsNullOrWhiteSpace(relatedFingerprint) ? null : relatedFingerprint,
+        CaptureId = string.IsNullOrWhiteSpace(captureId) ? null : captureId,
+        CapturedAt = capturedAt
     };
     session.Attachments[id] = attachment;
     store.Touch(session);
     store.AddEvent(session, BuildEvent(device, "feedback", "attachment", $"{kind}_attached",
-        $"Tester attached {kind} evidence.", null, null, $"attachment:{id:N}", null, buildId,
+        $"Tester attached {kind} evidence.", null, null, attachment.RelatedFingerprint ?? $"attachment:{id:N}", null, buildId,
         new Dictionary<string, double> { ["sizeBytes"] = file.Length },
-        new Dictionary<string, string> { ["attachmentId"] = id.ToString("D"), ["contentType"] = contentType }, null));
+        new Dictionary<string, string>
+        {
+            ["attachmentId"] = id.ToString("D"),
+            ["contentType"] = contentType,
+            ["captureId"] = attachment.CaptureId ?? string.Empty
+        }, attachment.CapturedAt));
     return Results.Ok(new AttachmentResponse(id, kind, attachment.FileName, contentType, file.Length, attachment.CreatedAt));
 }).DisableAntiforgery();
 
@@ -413,6 +582,90 @@ static bool AuthenticateTelemetry(Guid id, HttpRequest request, SessionStore sto
 static void AddEvent(SessionStore store, TestSession session, ConnectedDevice device, string level, string category, string message, string? details) =>
     store.AddEvent(session, BuildEvent(device, level, category, category, message, details, null, null, null, null, null, null, null));
 static BuildResponse ToBuild(PublishedBuild x) => new(x.Id, x.OriginalFileName, x.VersionName, x.VersionCode, x.SizeBytes, x.Sha256, x.UploadedAt);
+static bool TryDashboard(Guid id, HttpRequest request, SessionStore store, TokenService tokens, out TestSession session) =>
+    store.TryGet(id, out session!) &&
+    tokens.Verify(request.Headers["X-Dashboard-Token"].FirstOrDefault(), session.DashboardTokenHash);
+static object ToTestRun(TestSession session, TestRun run)
+{
+    session.TestCases.TryGetValue(run.TestCaseId, out var testCase);
+    return new
+    {
+        run.Id,
+        run.TestCaseId,
+        run.DeviceId,
+        run.BuildId,
+        run.Status,
+        run.CaptureId,
+        run.Notes,
+        run.FailureFingerprint,
+        run.CreatedAt,
+        run.StartedAt,
+        run.CompletedAt,
+        testCase
+    };
+}
+static object QualityReport(TestSession session)
+{
+    var runs = session.TestRuns.Values.ToArray();
+    var passed = runs.Count(x => x.Status == "passed");
+    var failed = runs.Count(x => x.Status == "failed");
+    var blocked = runs.Count(x => x.Status == "blocked");
+    var running = runs.Count(x => x.Status == "running");
+    var ready = runs.Count(x => x.Status == "ready");
+    var executed = passed + failed + blocked;
+    var verdict = failed > 0 ? "failed" : blocked > 0 ? "blocked" : ready + running > 0 || executed == 0 ? "incomplete" : "passed";
+    return new
+    {
+        verdict,
+        total = runs.Length,
+        executed,
+        passed,
+        failed,
+        blocked,
+        running,
+        ready,
+        passRate = executed == 0 ? 0 : Math.Round(passed * 100d / executed, 1),
+        diagnosedFailures = runs.Count(x => x.FailureFingerprint is not null && session.AiAnalyses.ContainsKey(x.FailureFingerprint))
+    };
+}
+static string BuildMarkdownReport(TestSession session)
+{
+    var quality = session.TestRuns.Values.ToArray();
+    var passed = quality.Count(x => x.Status == "passed");
+    var failed = quality.Count(x => x.Status == "failed");
+    var blocked = quality.Count(x => x.Status == "blocked");
+    var executed = passed + failed + blocked;
+    var verdict = failed > 0 ? "FAILED" : blocked > 0 ? "BLOCKED" : quality.Any(x => x.Status is "ready" or "running") || executed == 0 ? "INCOMPLETE" : "PASSED";
+    var text = new StringBuilder();
+    text.AppendLine($"# DevBridge test report — {session.AppName}").AppendLine();
+    text.AppendLine($"- Project: {session.ProjectName}");
+    text.AppendLine($"- Package: {session.PackageName ?? "Not supplied"}");
+    text.AppendLine($"- Generated: {DateTimeOffset.UtcNow:O}");
+    text.AppendLine($"- Release verdict: **{verdict}**");
+    text.AppendLine($"- Results: {passed} passed, {failed} failed, {blocked} blocked, {quality.Length - executed} pending/running").AppendLine();
+    text.AppendLine("## Test runs").AppendLine();
+    if (quality.Length == 0) text.AppendLine("No test runs were scheduled.");
+    foreach (var run in quality.OrderBy(x => x.CreatedAt))
+    {
+        session.TestCases.TryGetValue(run.TestCaseId, out var testCase);
+        session.Devices.TryGetValue(run.DeviceId, out var device);
+        text.AppendLine($"### [{run.Status.ToUpperInvariant()}] {testCase?.Title ?? "Deleted test case"}");
+        text.AppendLine($"- Device: {device?.Name ?? run.DeviceId.ToString("D")}");
+        text.AppendLine($"- Expected: {testCase?.ExpectedResult ?? "Unavailable"}");
+        if (!string.IsNullOrWhiteSpace(run.Notes)) text.AppendLine($"- Tester notes: {run.Notes.ReplaceLineEndings(" ")}");
+        if (run.FailureFingerprint is not null && session.AiAnalyses.TryGetValue(run.FailureFingerprint, out var analysis))
+        {
+            text.AppendLine($"- AI diagnosis: {analysis.Summary.ReplaceLineEndings(" ")}");
+            text.AppendLine($"- Problem location: {analysis.ProblemLocation.ReplaceLineEndings(" ")}");
+            text.AppendLine($"- Suggested fix: {analysis.SuggestedFix.ReplaceLineEndings(" ")}");
+            text.AppendLine($"- Confidence: {analysis.Confidence}%");
+        }
+        text.AppendLine();
+    }
+    text.AppendLine("## Evidence limitations").AppendLine();
+    text.AppendLine("A pass/fail verdict reflects the scheduled runs and captured evidence in this session. It does not prove coverage of unscheduled behavior.");
+    return text.ToString();
+}
 static string Clean(string? value, string fallback, int max) { var result = string.IsNullOrWhiteSpace(value) ? fallback : value.Trim().ToLowerInvariant(); return result.Length <= max ? result : result[..max]; }
 static string? Truncate(string? value, int max) => value is { Length: > 0 } ? value[..Math.Min(value.Length, max)] : value;
 static IReadOnlyDictionary<string, string> CleanContext(IReadOnlyDictionary<string, string>? source) =>
